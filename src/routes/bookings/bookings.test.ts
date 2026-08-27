@@ -196,7 +196,7 @@ describe("bookings routes", () => {
       expect(res.status).toBe(409);
     });
 
-    it("aLLOWS back-to-back stays where check-in equals the prior check-out", async () => {
+    it("allows back-to-back stays where check-in equals the prior check-out", async () => {
       const first = await book(guest, propertyId, dayFromNow(10), dayFromNow(15));
       expect(first.status).toBe(201);
 

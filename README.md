@@ -1,113 +1,105 @@
-# Hono Open API Starter
+# Rentals API
 
-A starter template for building fully documented type-safe JSON APIs with Hono and Open API.
+Short-term rental booking and management for Kenya. Single host, public
+guests, M-Pesa payment.
 
-> A new version of drizzle was released since the video showing this starter was made. See [this commit](https://github.com/w3cj/hono-open-api-starter/commit/92525ff84fb2a247c8245cc889b2320d7b3b6e2c) for the changes required to use drizzle v0.35+
-
-> A new version of zod was released since the video showing this starter was made. See [this commit](https://github.com/w3cj/hono-open-api-starter/commit/f7f88dfc40cb7bda53f8729983d8308c2d6c780b) for the changes required to use zod v4.
-
-> For a cloudflare specific template, see the [cloudflare branch](https://github.com/w3cj/hono-open-api-starter/tree/cloudflare) on this repo
-
-> For other deployment examples see the [hono-node-deployment-examples](https://github.com/w3cj/hono-node-deployment-examples) repo
-
-- [Hono Open API Starter](#hono-open-api-starter)
-  - [Included](#included)
-  - [Setup](#setup)
-  - [Code Tour](#code-tour)
-  - [Endpoints](#endpoints)
-  - [References](#references)
-
-## Included
-
-- Structured logging with [pino](https://getpino.io/) / [hono-pino](https://www.npmjs.com/package/hono-pino)
-- Documented / type-safe routes with [@hono/zod-openapi](https://github.com/honojs/middleware/tree/main/packages/zod-openapi)
-- Interactive API documentation with [scalar](https://scalar.com/#api-docs) / [@scalar/hono-api-reference](https://github.com/scalar/scalar/tree/main/packages/hono-api-reference)
-- Convenience methods / helpers to reduce boilerplate with [stoker](https://www.npmjs.com/package/stoker)
-- Type-safe schemas and environment variables with [zod](https://zod.dev/)
-- Single source of truth database schemas with [drizzle](https://orm.drizzle.team/docs/overview) and [drizzle-zod](https://orm.drizzle.team/docs/zod)
-- Testing with [vitest](https://vitest.dev/)
-- Sensible editor, formatting and linting settings with [@antfu/eslint-config](https://github.com/antfu/eslint-config)
+Built on [Hono](https://hono.dev/) with `@hono/zod-openapi`, Drizzle ORM
+against Postgres, and Better Auth for phone+OTP sign-in. Interactive API docs
+are served by [Scalar](https://scalar.com/).
 
 ## Setup
 
-Clone this template without git history
-
-```sh
-npx degit w3cj/hono-open-api-starter my-api
-cd my-api
-```
-
-Create `.env` file
-
-```sh
-cp .env.example .env
-```
-
-Install dependencies
+Requires Node 20+, pnpm, and Docker.
 
 ```sh
 pnpm install
+cp .env.example .env
 ```
 
-Create sqlite db / push schema
+Fill in `BETTER_AUTH_SECRET` (32+ chars):
 
 ```sh
-pnpm drizzle-kit push
+node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
 ```
 
-Run
+Start Postgres (dev + test) and Redis, then migrate and run:
 
 ```sh
+./dev.sh
+pnpm db:migrate
 pnpm dev
 ```
 
-Lint
+The API is at http://localhost:9999 — API reference at
+[`/reference`](http://localhost:9999/reference), OpenAPI spec at `/doc`.
 
-```sh
-pnpm lint
-```
+## Commands
 
-Test
+| Command                       | What it does                                             |
+| ----------------------------- | -------------------------------------------------------- |
+| `./dev.sh`                    | Start Postgres (:5432 dev, :5433 test) and Redis (:6379) |
+| `pnpm dev`                    | Run the API in watch mode                                |
+| `pnpm test`                   | Run the suite against the test database                  |
+| `pnpm lint` / `pnpm lint:fix` | ESLint                                                   |
+| `pnpm typecheck`              | `tsc --noEmit`                                           |
+| `pnpm db:generate`            | Create a migration from `src/db/schema.ts`               |
+| `pnpm db:migrate`             | Apply migrations                                         |
+| `pnpm db:studio`              | Inspect the database                                     |
+
+## Endpoints
+
+| Path                                   | Auth   | Description                                 |
+| -------------------------------------- | ------ | ------------------------------------------- |
+| `GET /`                                | —      | Index                                       |
+| `GET /health`                          | —      | Readiness probe; pings the database         |
+| `GET /doc`                             | —      | OpenAPI specification                       |
+| `GET /reference`                       | —      | Scalar API documentation                    |
+| `POST /api/auth/phone-number/send-otp` | —      | Request a sign-in OTP                       |
+| `POST /api/auth/phone-number/verify`   | —      | Verify the OTP, receive a session           |
+| `GET /properties`                      | public | Browse active listings (filters, paginated) |
+| `GET /properties/{id}`                 | public | One listing with images and amenities       |
+| `POST /properties`                     | admin  | Create a listing                            |
+| `PATCH /properties/{id}`               | admin  | Update a listing                            |
+| `DELETE /properties/{id}`              | admin  | Delete (409 if it has bookings)             |
+| `GET /properties/{id}/availability`    | public | Taken date ranges                           |
+| `POST /bookings`                       | guest  | Book a property (409 if dates are taken)    |
+| `GET /bookings`                        | guest  | Own bookings; admin sees all                |
+| `GET /bookings/{id}`                   | guest  | One booking                                 |
+| `POST /bookings/{id}/cancel`           | guest  | Cancel a `pending_payment` booking          |
+| `POST /blackouts`                      | admin  | Block dates without faking a booking        |
+
+## Design notes
+
+**Double-booking is impossible, not merely checked.** `bookings` carries a
+Postgres `EXCLUDE USING gist` constraint over
+`daterange(check_in, check_out, '[)')`, scoped to the statuses that hold dates.
+A service-layer availability check cannot be the defence — two concurrent
+requests both pass it and both insert. The handler catches SQLSTATE `23P01`
+and returns 409. This is covered by tests that fire five simultaneous requests
+at the same dates and assert exactly one wins.
+
+Ranges are half-open, so a guest checking out on the 15th frees the 15th for
+the next arrival.
+
+**Dates are `date`, not `timestamp`.** A stay is a calendar range plus a
+property check-in time. As `timestamptz` the date shifts across timezones and
+the nights count drifts.
+
+**Money is integer cents with a `CHECK (x % 100 = 0)`.** M-Pesa only transacts
+whole shillings, so the constraint makes an unpayable amount unstorable.
+
+**Prices are snapshotted.** `bookings.totalAmountCents` is computed server-side
+at creation and never recalculated — changing a property's rate must not
+change what an existing guest owes. A client-sent total is ignored.
+
+See [CLAUDE.md](./CLAUDE.md) for domain conventions, the Better Auth schema
+regeneration procedure, and what is deliberately not built yet.
+
+## Testing
+
+`./dev.sh` must be running — the suite uses real Postgres. Tests drive the
+actual phone+OTP sign-in flow rather than forging session rows.
 
 ```sh
 pnpm test
 ```
-
-## Code Tour
-
-Base hono app exported from [app.ts](./src/app.ts). Local development uses [@hono/node-server](https://hono.dev/docs/getting-started/nodejs) defined in [index.ts](./src/index.ts) - update this file or create a new entry point to use your preferred runtime.
-
-Typesafe env defined in [env.ts](./src/env.ts) - add any other required environment variables here. The application will not start if any required environment variables are missing
-
-See [src/routes/tasks](./src/routes/tasks/) for an example Open API group. Copy this folder / use as an example for your route groups.
-
-- Router created in [tasks.index.ts](./src/routes/tasks/tasks.index.ts)
-- Route definitions defined in [tasks.routes.ts](./src/routes/tasks/tasks.routes.ts)
-- Hono request handlers defined in [tasks.handlers.ts](./src/routes/tasks/tasks.handlers.ts)
-- Group unit tests defined in [tasks.test.ts](./src/routes/tasks/tasks.test.ts)
-
-All app routes are grouped together and exported into single type as `AppType` in [app.ts](./src/app.ts) for use in [RPC / hono/client](https://hono.dev/docs/guides/rpc).
-
-## Endpoints
-
-| Path               | Description              |
-| ------------------ | ------------------------ |
-| GET /doc           | Open API Specification   |
-| GET /reference     | Scalar API Documentation |
-| GET /tasks         | List all tasks           |
-| POST /tasks        | Create a task            |
-| GET /tasks/{id}    | Get one task by id       |
-| PATCH /tasks/{id}  | Patch one task by id     |
-| DELETE /tasks/{id} | Delete one task by id    |
-
-## References
-
-- [What is Open API?](https://swagger.io/docs/specification/v3_0/about/)
-- [Hono](https://hono.dev/)
-  - [Zod OpenAPI Example](https://hono.dev/examples/zod-openapi)
-  - [Testing](https://hono.dev/docs/guides/testing)
-  - [Testing Helper](https://hono.dev/docs/helpers/testing)
-- [@hono/zod-openapi](https://github.com/honojs/middleware/tree/main/packages/zod-openapi)
-- [Scalar Documentation](https://github.com/scalar/scalar/tree/main/?tab=readme-ov-file#documentation)
-  - [Themes / Layout](https://github.com/scalar/scalar/blob/main/documentation/themes.md)
-  - [Configuration](https://github.com/scalar/scalar/blob/main/documentation/configuration.md)
