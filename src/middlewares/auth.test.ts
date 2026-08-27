@@ -1,0 +1,88 @@
+import { createRoute, z } from "@hono/zod-openapi";
+import * as HttpStatusCodes from "stoker/http-status-codes";
+import { jsonContent } from "stoker/openapi/helpers";
+import { beforeEach, describe, expect, it } from "vitest";
+
+import { forbiddenSchema, unauthorizedSchema } from "@/lib/constants";
+import { createRouter, createTestApp } from "@/lib/create-app";
+import { nextPhone, resetDb, signIn } from "@/test/helpers";
+
+import { requireAuth, requireRole } from "./auth";
+
+const whoAmI = createRoute({
+  path: "/whoami",
+  method: "get",
+  middleware: [requireAuth] as const,
+  responses: {
+    [HttpStatusCodes.OK]: jsonContent(z.object({ role: z.string() }), "The caller"),
+    [HttpStatusCodes.UNAUTHORIZED]: jsonContent(unauthorizedSchema, "Not signed in"),
+  },
+});
+
+const adminOnly = createRoute({
+  path: "/admin-only",
+  method: "get",
+  middleware: [requireAuth, requireRole("admin")] as const,
+  responses: {
+    [HttpStatusCodes.OK]: jsonContent(z.object({ ok: z.boolean() }), "Allowed"),
+    [HttpStatusCodes.UNAUTHORIZED]: jsonContent(unauthorizedSchema, "Not signed in"),
+    [HttpStatusCodes.FORBIDDEN]: jsonContent(forbiddenSchema, "Wrong role"),
+  },
+});
+
+const router = createRouter()
+  .openapi(whoAmI, c => c.json({ role: c.var.user!.role }, HttpStatusCodes.OK))
+  .openapi(adminOnly, c => c.json({ ok: true }, HttpStatusCodes.OK));
+
+const app = createTestApp(router);
+
+describe("auth middleware", () => {
+  beforeEach(async () => {
+    await resetDb();
+  });
+
+  it("rejects an unauthenticated request with 401", async () => {
+    const res = await app.request("/whoami");
+    expect(res.status).toBe(401);
+  });
+
+  it("rejects a garbage session cookie with 401", async () => {
+    const res = await app.request("/whoami", {
+      headers: { cookie: "better-auth.session_token=not-a-real-token" },
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("allows a signed-in guest and exposes their role", async () => {
+    const guest = await signIn(nextPhone());
+
+    const res = await app.request("/whoami", { headers: guest.headers });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ role: "guest" });
+  });
+
+  it("defaults a newly signed-up user to the guest role", async () => {
+    const guest = await signIn(nextPhone());
+    const res = await app.request("/whoami", { headers: guest.headers });
+    expect((await res.json()).role).toBe("guest");
+  });
+
+  it("rejects a guest from an admin-only route with 403, not 401", async () => {
+    const guest = await signIn(nextPhone());
+
+    const res = await app.request("/admin-only", { headers: guest.headers });
+    expect(res.status).toBe(403);
+  });
+
+  it("allows an admin through an admin-only route", async () => {
+    const admin = await signIn(nextPhone(), "admin");
+
+    const res = await app.request("/admin-only", { headers: admin.headers });
+    expect(res.status).toBe(200);
+  });
+
+  it("returns 401 (not 403) on a role-gated route when unauthenticated", async () => {
+    const res = await app.request("/admin-only");
+    expect(res.status).toBe(401);
+  });
+});

@@ -2,9 +2,18 @@ import type { OpenAPIHono, RouteConfig, RouteHandler } from "@hono/zod-openapi";
 import type { Schema } from "hono";
 import type { PinoLogger } from "hono-pino";
 
+import type { Session } from "./auth";
+
+export type UserRole = "guest" | "host" | "admin";
+
+/** The Better Auth user, narrowed with the `role` additional field. */
+export type AuthUser = Session["user"] & { role: string };
+
 export interface AppBindings {
   Variables: {
     logger: PinoLogger;
+    user: AuthUser | null;
+    session: Session["session"] | null;
   };
 };
 

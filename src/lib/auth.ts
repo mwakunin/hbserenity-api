@@ -9,6 +9,13 @@ import env from "@/env";
 import { normalizeKenyanPhone } from "./phone";
 
 /**
+ * Test seam: the most recent OTP issued per phone number. Populated only when
+ * NODE_ENV=test, so the suite can drive the real sign-in flow end to end
+ * instead of forging session rows and hoping the cookie format matches.
+ */
+export const sentOtps = new Map<string, string>();
+
+/**
  * Phone + OTP is the primary login method, not email/password — it matches how
  * Kenyan guests actually identify themselves, and the verified number is the
  * same one M-Pesa will charge.
@@ -44,6 +51,11 @@ export const auth = betterAuth({
 
       async sendOTP({ phoneNumber: to, code }) {
         const normalized = normalizeKenyanPhone(to) ?? to;
+
+        if (env.NODE_ENV === "test") {
+          sentOtps.set(normalized, code);
+          return;
+        }
 
         if (env.NODE_ENV === "production") {
           // TODO: wire an SMS provider (Africa's Talking / Twilio) before
