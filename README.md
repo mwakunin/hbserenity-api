@@ -1,7 +1,13 @@
 # Rentals API
 
 Short-term rental booking and management for Kenya. Single host, public
-guests, M-Pesa payment.
+guests.
+
+> **Status:** the booking core is complete and tested. M-Pesa payment is
+> **not implemented yet** — the `payments` table and configuration are in
+> place, but no code calls Safaricom. Bookings are created in
+> `pending_payment` and stay there. See [CLAUDE.md](./CLAUDE.md) for the full
+> list of what is and isn't built.
 
 Built on [Hono](https://hono.dev/) with `@hono/zod-openapi`, Drizzle ORM
 against Postgres, and Better Auth for phone+OTP sign-in. Interactive API docs

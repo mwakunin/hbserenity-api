@@ -276,6 +276,28 @@ describe("properties routes", () => {
       expect(res.status).toBe(200);
     });
 
+    // The draft response depends on who is asking — a shared cache must not
+    // store the admin's copy and replay it to anonymous visitors.
+    it("marks a draft response no-store, since visibility depends on the caller", async () => {
+      const admin = await signIn(nextPhone(), "admin");
+      const draft = await makeProperty(admin.id, { status: "draft" });
+
+      const res = await app.request(`/properties/${draft.id}`, {
+        headers: admin.headers,
+      });
+
+      expect(res.status).toBe(200);
+      expect(res.headers.get("cache-control")).toBe("no-store");
+    });
+
+    it("does not set no-store on a public active listing", async () => {
+      const admin = await signIn(nextPhone(), "admin");
+      const property = await makeProperty(admin.id, { status: "active" });
+
+      const res = await app.request(`/properties/${property.id}`);
+      expect(res.headers.get("cache-control")).toBeNull();
+    });
+
     it("404s an unknown id", async () => {
       const res = await app.request(
         "/properties/4651e634-a530-4484-9b09-9616a28f35e3",

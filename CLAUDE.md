@@ -6,7 +6,9 @@ Guidance for Claude Code when working in this repository.
 
 A short-term rental management platform for Kenya (Airbnb-style). **Single
 host** — you own and manage the properties; guests browse publicly and must
-verify a phone number to book. Payment is by M-Pesa (STK push).
+verify a phone number to book. Payment is intended to be M-Pesa (STK push),
+but **that is not built yet** — see "Not built yet" below. Bookings are
+created in `pending_payment` and stay there.
 
 This repo currently contains **only the API** — Hono + `@hono/zod-openapi`,
 Drizzle ORM, Postgres (local Docker for dev/test, Neon for staging/prod). It is
@@ -200,7 +202,7 @@ one is missing. The M-Pesa / Resend / ImageKit values are **optional in dev and
 test, required when `NODE_ENV=production`** — so the API boots locally without
 credentials for features that aren't built yet.
 
-```
+```dotenv
 DATABASE_URL=                # local Docker Postgres (dev); Neon connection string in staging/prod
 TEST_DATABASE_URL=           # local Docker Postgres (test, :5433); required when NODE_ENV=test
 REDIS_URL=                   # local Docker Redis in dev

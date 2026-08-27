@@ -16,6 +16,23 @@ import { normalizeKenyanPhone } from "./phone";
 export const sentOtps = new Map<string, string>();
 
 /**
+ * Phone + OTP is the ONLY way to sign in, so an unconfigured SMS provider
+ * means nobody can authenticate at all. Refuse to start rather than boot a
+ * deployment whose login is silently broken — a failed deploy is visible,
+ * whereas "guests cannot sign in" surfaces only once real users hit it.
+ *
+ * Wiring a provider (Africa's Talking is the usual choice in Kenya) means
+ * adding its credentials to env.ts and sending the message in sendOTP below.
+ */
+if (env.NODE_ENV === "production") {
+  throw new Error(
+    "No SMS provider is configured, so phone OTP sign-in cannot work. "
+    + "Wire one up in src/lib/auth.ts (sendOTP) and add its credentials to "
+    + "src/env.ts before deploying to production.",
+  );
+}
+
+/**
  * Phone + OTP is the primary login method, not email/password — it matches how
  * Kenyan guests actually identify themselves, and the verified number is the
  * same one M-Pesa will charge.
@@ -57,14 +74,9 @@ export const auth = betterAuth({
           return;
         }
 
-        if (env.NODE_ENV === "production") {
-          // TODO: wire an SMS provider (Africa's Talking / Twilio) before
-          // going live. Failing loudly beats silently not delivering an OTP.
-          throw new Error(
-            "No SMS provider configured — cannot deliver OTP in production",
-          );
-        }
-
+        // Production never reaches here: the startup guard above stops the
+        // process before any request is served. Replace that guard and this
+        // line together when an SMS provider is wired in.
         console.warn(`[dev] OTP for ${normalized}: ${code}`);
       },
 

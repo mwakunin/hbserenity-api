@@ -121,6 +121,13 @@ export const getOne: AppRouteHandler<GetOneRoute> = async (c) => {
 
   const { amenities, ...rest } = property;
 
+  // This response depends on who is asking: an admin sees a draft that
+  // everyone else gets a 404 for. A shared cache must not store the admin's
+  // copy and replay it to anonymous visitors, which would leak an unpublished
+  // listing.
+  if (property.status !== "active")
+    c.header("Cache-Control", "no-store");
+
   return c.json({
     ...rest,
     amenities: amenities.map(a => a.amenity),

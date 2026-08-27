@@ -101,6 +101,41 @@ describe("bookings routes", () => {
       expect(res.status).toBe(201);
     });
 
+    // A shape-only regex accepts these; Postgres then rejects them as
+    // "date/time field value out of range", turning bad input into a 500.
+    it.each([
+      ["2026-02-30", "February 30th"],
+      ["2026-13-01", "month 13"],
+      ["2026-04-31", "April 31st"],
+      ["2027-02-29", "Feb 29 in a non-leap year"],
+    ])("422s %s (%s) rather than 500ing", async (checkIn) => {
+      const res = await app.request("/bookings", {
+        method: "POST",
+        headers: { "content-type": "application/json", ...guest.headers },
+        body: JSON.stringify({
+          propertyId,
+          checkIn,
+          checkOut: dayFromNow(90),
+          guestCount: 2,
+        }),
+      });
+      expect(res.status).toBe(422);
+    });
+
+    it("accepts Feb 29 in a leap year", async () => {
+      const res = await app.request("/bookings", {
+        method: "POST",
+        headers: { "content-type": "application/json", ...guest.headers },
+        body: JSON.stringify({
+          propertyId,
+          checkIn: "2028-02-29",
+          checkOut: "2028-03-02",
+          guestCount: 2,
+        }),
+      });
+      expect(res.status).toBe(201);
+    });
+
     it("422s a malformed date", async () => {
       const res = await app.request("/bookings", {
         method: "POST",
@@ -434,6 +469,27 @@ describe("bookings routes", () => {
         `/properties/4651e634-a530-4484-9b09-9616a28f35e3/availability?from=${dayFromNow(0)}&to=${dayFromNow(60)}`,
       );
       expect(res.status).toBe(404);
+    });
+
+    it("422s an inverted window rather than reporting everything free", async () => {
+      const res = await app.request(
+        `/properties/${propertyId}/availability?from=${dayFromNow(60)}&to=${dayFromNow(10)}`,
+      );
+      expect(res.status).toBe(422);
+    });
+
+    it("422s a zero-length window", async () => {
+      const res = await app.request(
+        `/properties/${propertyId}/availability?from=${dayFromNow(10)}&to=${dayFromNow(10)}`,
+      );
+      expect(res.status).toBe(422);
+    });
+
+    it("422s an impossible calendar date in the window", async () => {
+      const res = await app.request(
+        `/properties/${propertyId}/availability?from=2026-02-30&to=2026-03-10`,
+      );
+      expect(res.status).toBe(422);
     });
   });
 

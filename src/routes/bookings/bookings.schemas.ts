@@ -10,11 +10,16 @@ export const selectBlackoutSchema = toZodV4SchemaTyped(
   createSelectSchema(propertyBlackouts),
 );
 
-/** `YYYY-MM-DD`, matching the `date` columns — not a timestamp. */
-const dateString = z
-  .string()
-  .regex(/^\d{4}-\d{2}-\d{2}$/, "Must be a calendar date in YYYY-MM-DD form")
-  .openapi({ example: "2026-09-10" });
+/**
+ * `YYYY-MM-DD`, matching the `date` columns — not a timestamp.
+ *
+ * z.iso.date() rather than a shape regex: `^\d{4}-\d{2}-\d{2}$` happily
+ * accepts 2026-02-30 and 2026-13-45, which Postgres then rejects as
+ * "date/time field value out of range" — a 500 for what is really bad input.
+ * This validates the calendar, so February 30th is a 422 and February 29th
+ * still works in a leap year.
+ */
+const dateString = z.iso.date().openapi({ example: "2026-09-10" });
 
 /**
  * Note what is absent: no price field. The total is computed server-side from
@@ -34,7 +39,13 @@ export const createBookingSchema = z.object({
 export const availabilityQuerySchema = z.object({
   from: dateString,
   to: dateString,
-});
+}).refine(
+  // Same ordering rule the booking and blackout schemas enforce. Without it an
+  // inverted window silently returns "nothing unavailable", which reads as
+  // "these dates are free" rather than "your query was backwards".
+  q => q.to > q.from,
+  { message: "'to' must be later than 'from'", path: ["to"] },
+);
 
 export const availabilityResponseSchema = z.object({
   propertyId: z.string(),
