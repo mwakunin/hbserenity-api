@@ -187,14 +187,25 @@ Non-default dev ports are deliberate: another project on this machine binds
   new branch that settles an attempt must route through it.
 
   The same rule applies to a failed push: `MpesaError.definitive` is true only
-  when Safaricom *answered and refused* (HTTP < 500). A 5xx, a timeout or a
+  when Safaricom _answered and refused_ (HTTP < 500). A 5xx, a timeout or a
   network error is not proof that no prompt exists.
 
-  And because a *succeeded* attempt no longer holds the pending-only unique
+  And because a _succeeded_ attempt no longer holds the pending-only unique
   index, the booking status is re-read **under a row lock** immediately before
   inserting a new attempt. The check at the top of `initiate` is stale by then:
   `releaseStaleAttempt` makes network calls, and a callback can confirm the
   booking inside that window.
+
+- **Sending a prompt is an external side effect, so one window is
+  irreducible.** The booking is checked and the attempt inserted (with
+  `pushDispatchedAt`) in a single locked transaction, but the push itself
+  happens after that commit. A late callback for an earlier attempt can
+  confirm the booking in between. Closing that would mean holding a row lock
+  across a network call, which stalls the callback and risks exhausting the
+  connection pool — so the outcome is made *visible* instead: after a
+  successful push the booking is re-read, and a prompt sent against an
+  already-settled booking is flagged on the payment for refund review. Keep
+  that flag; it is the only trace of a genuine duplicate charge.
 
 - **Never release a stale attempt on a timer alone.** The STK request has no
   guaranteed lifetime, so assuming a prompt died after N seconds can leave

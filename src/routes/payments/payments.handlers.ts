@@ -233,10 +233,17 @@ export const initiate: AppRouteHandler<InitiateRoute> = async (c) => {
 
       // A new row per attempt — payment history is append-only, so a retry
       // never overwrites the record of a previous failure.
+      //
+      // pushDispatchedAt is set HERE, inside the same transaction and under
+      // the same lock, rather than in a follow-up write. From this commit on a
+      // prompt may exist, and nothing may release the attempt without proof it
+      // doesn't — doing it separately left a window where the booking could be
+      // confirmed between insert and marker.
       const [row] = await tx.insert(payments).values({
         bookingId: booking.id,
         phoneNumber: payFrom,
         amountCents: booking.totalAmountCents,
+        pushDispatchedAt: new Date(),
       }).returning();
 
       return row;
@@ -258,14 +265,6 @@ export const initiate: AppRouteHandler<InitiateRoute> = async (c) => {
       HttpStatusCodes.CONFLICT,
     );
   }
-
-  // Record that a push is about to go out, BEFORE sending it. From here on a
-  // prompt may exist, and nothing may release this attempt without proof that
-  // it doesn't. Crashing between this write and the push is the safe
-  // direction: the attempt is held rather than released.
-  await db.update(payments)
-    .set({ pushDispatchedAt: new Date() })
-    .where(eq(payments.id, payment.id));
 
   let push;
   try {
@@ -318,6 +317,35 @@ export const initiate: AppRouteHandler<InitiateRoute> = async (c) => {
     return c.json(
       { message: "A payment request may have been sent to your phone. Please check before retrying." },
       HttpStatusCodes.BAD_GATEWAY,
+    );
+  }
+
+  // Sending a prompt is an external side effect, so it cannot be inside the
+  // transaction that checked the booking. That leaves an irreducible window
+  // between commit and the push landing, in which a late callback for an
+  // earlier attempt can confirm the booking. The window cannot be closed
+  // without holding a row lock across a network call, which would stall the
+  // callback and risk exhausting the connection pool — so instead the outcome
+  // is made visible: a prompt sent against an already-settled booking is
+  // flagged for refund rather than passing silently.
+  const [stillPayable] = await db.select({ status: bookings.status })
+    .from(bookings)
+    .where(eq(bookings.id, booking.id));
+
+  if (stillPayable && stillPayable.status !== "pending_payment") {
+    await db.update(payments)
+      .set({
+        resultDesc: `Prompt sent after the booking became '${stillPayable.status}' — possible duplicate charge, needs refund review`,
+      })
+      .where(eq(payments.id, payment.id));
+
+    c.var.logger.error(
+      {
+        paymentId: payment.id,
+        bookingId: booking.id,
+        bookingStatus: stillPayable.status,
+      },
+      "STK prompt sent for a booking that is no longer awaiting payment",
     );
   }
 

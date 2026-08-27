@@ -709,6 +709,52 @@ describe("payments routes", () => {
     });
   });
 
+  describe("prompt sent against a settled booking", () => {
+    // The push is an external side effect, so it can't sit inside the
+    // transaction that checked the booking. The remaining window can't be
+    // closed — but a prompt that lands against an already-settled booking must
+    // not pass silently.
+    it("flags the attempt for refund review", async () => {
+      // Confirm the booking during the token fetch: after the insert
+      // transaction committed, before the push itself goes out.
+      vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (url) => {
+        if (String(url).includes("/oauth/")) {
+          await db.update(bookings)
+            .set({ status: "confirmed" })
+            .where(eq(bookings.id, bookingId));
+          return jsonResponse(TOKEN);
+        }
+        return jsonResponse(PUSH_OK);
+      }));
+
+      const res = await pay(guest);
+      expect(res.status).toBe(202);
+
+      const [row] = await db.select().from(payments).where(eq(payments.bookingId, bookingId));
+      expect(row.resultDesc).toMatch(/possible duplicate charge/i);
+    });
+
+    it("says nothing when the booking is still awaiting payment", async () => {
+      mockFetch(jsonResponse(TOKEN), jsonResponse(PUSH_OK));
+      await pay(guest);
+
+      const [row] = await db.select().from(payments).where(eq(payments.bookingId, bookingId));
+      expect(row.resultDesc).toBeNull();
+    });
+
+    it("sets pushDispatchedAt atomically with the insert", async () => {
+      // A separate follow-up write would leave a window where the attempt
+      // exists but is not yet marked as possibly having a live prompt.
+      mockFetch(jsonResponse(TOKEN), jsonResponse(PUSH_OK));
+      await pay(guest);
+
+      const [row] = await db.select().from(payments).where(eq(payments.bookingId, bookingId));
+      expect(row.pushDispatchedAt).not.toBeNull();
+      expect(row.pushDispatchedAt!.getTime())
+        .toBeLessThanOrEqual(row.createdAt.getTime() + 50);
+    });
+  });
+
   describe("forged callback resistance", () => {
     it("does not hand the callback identifier to the booking owner", async () => {
       mockFetch(jsonResponse(TOKEN), jsonResponse(PUSH_OK));
