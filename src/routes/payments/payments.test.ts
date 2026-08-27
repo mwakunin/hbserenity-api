@@ -452,6 +452,123 @@ describe("payments routes", () => {
     });
   });
 
+  describe("stale attempt handling", () => {
+    /** Pushes the attempt's createdAt past the 90s cooldown. */
+    async function backdate() {
+      await db.update(payments)
+        .set({ createdAt: new Date(Date.now() - 120_000) })
+        .where(eq(payments.bookingId, bookingId));
+    }
+
+    // `timeout` means "we stopped waiting", which is our guess rather than
+    // Safaricom's verdict — so a late success must still be honoured, or the
+    // money is taken and the booking never confirms.
+    it("still honours a success callback for an attempt marked timed out", async () => {
+      mockFetch(jsonResponse(TOKEN), jsonResponse(PUSH_OK));
+      await pay(guest);
+      vi.unstubAllGlobals();
+      resetTokenCache();
+
+      await db.update(payments)
+        .set({ status: "timeout" })
+        .where(eq(payments.bookingId, bookingId));
+
+      mockFetch(jsonResponse(TOKEN), jsonResponse({ ResultCode: "0", ResultDesc: "ok" }));
+      await postCallback(successCallback("ws_CO_test_1", totalCents / 100));
+
+      const [b] = await db.select().from(bookings).where(eq(bookings.id, bookingId));
+      expect(b.status).toBe("confirmed");
+    });
+
+    // A `failed` row IS Safaricom's verdict, so it must stay closed —
+    // reopening it would let a forged callback overwrite a real failure.
+    it("does not reopen an attempt Safaricom already ruled failed", async () => {
+      mockFetch(jsonResponse(TOKEN), jsonResponse(PUSH_OK));
+      await pay(guest);
+      vi.unstubAllGlobals();
+      resetTokenCache();
+
+      await db.update(payments)
+        .set({ status: "failed" })
+        .where(eq(payments.bookingId, bookingId));
+
+      mockFetch(jsonResponse(TOKEN), jsonResponse({ ResultCode: "0", ResultDesc: "ok" }));
+      await postCallback(successCallback("ws_CO_test_1", totalCents / 100));
+
+      const [b] = await db.select().from(bookings).where(eq(bookings.id, bookingId));
+      expect(b.status).toBe("pending_payment");
+    });
+
+    it("releases an attempt whose push never reached Safaricom", async () => {
+      // stkPush failed, so the row has no checkoutRequestId and no prompt was
+      // ever delivered — nothing for a retry to collide with.
+      mockFetch(jsonResponse(TOKEN), new Error("ECONNREFUSED"));
+      await pay(guest);
+      await db.update(payments)
+        .set({ status: "pending", checkoutRequestId: null })
+        .where(eq(payments.bookingId, bookingId));
+      await backdate();
+      vi.unstubAllGlobals();
+      resetTokenCache();
+
+      mockFetch(jsonResponse(TOKEN), jsonResponse(PUSH_OK));
+      const res = await pay(guest);
+
+      expect(res.status).toBe(202);
+      const rows = await db.select().from(payments).where(eq(payments.bookingId, bookingId));
+      expect(rows).toHaveLength(2);
+    });
+
+    it("refuses the retry while Safaricom still has the prompt live", async () => {
+      mockFetch(jsonResponse(TOKEN), jsonResponse(PUSH_OK));
+      await pay(guest);
+      await backdate();
+      vi.unstubAllGlobals();
+      resetTokenCache();
+
+      // 1001 = transaction in process. Not a terminal verdict, so the old
+      // prompt may still be open.
+      mockFetch(
+        jsonResponse(TOKEN),
+        jsonResponse({ ResultCode: "1001", ResultDesc: "The transaction is being processed" }),
+      );
+      const res = await pay(guest);
+
+      // Releasing here could put a second live prompt on the handset.
+      expect(res.status).toBe(409);
+    });
+
+    it("refuses the retry when Safaricom cannot be reached", async () => {
+      mockFetch(jsonResponse(TOKEN), jsonResponse(PUSH_OK));
+      await pay(guest);
+      await backdate();
+      vi.unstubAllGlobals();
+      resetTokenCache();
+
+      mockFetch(new Error("safaricom down"));
+      const res = await pay(guest);
+
+      // Fail closed: we cannot prove the old prompt is dead.
+      expect(res.status).toBe(409);
+    });
+
+    it("settles the booking if the stale attempt turns out to have succeeded", async () => {
+      mockFetch(jsonResponse(TOKEN), jsonResponse(PUSH_OK));
+      await pay(guest);
+      await backdate();
+      vi.unstubAllGlobals();
+      resetTokenCache();
+
+      mockFetch(jsonResponse(TOKEN), jsonResponse({ ResultCode: "0", ResultDesc: "ok" }));
+      const res = await pay(guest);
+
+      // Already paid — don't charge again.
+      expect(res.status).toBe(409);
+      const [b] = await db.select().from(bookings).where(eq(bookings.id, bookingId));
+      expect(b.status).toBe("confirmed");
+    });
+  });
+
   describe("forged callback resistance", () => {
     it("does not hand the callback identifier to the booking owner", async () => {
       mockFetch(jsonResponse(TOKEN), jsonResponse(PUSH_OK));

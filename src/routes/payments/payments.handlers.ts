@@ -1,4 +1,4 @@
-import { and, desc, eq, lt } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import * as HttpStatusCodes from "stoker/http-status-codes";
 import * as HttpStatusPhrases from "stoker/http-status-phrases";
 
@@ -26,11 +26,124 @@ import type {
 const ACK = { ResultCode: 0, ResultDesc: "Accepted" } as const;
 
 /**
- * How long a pending push blocks another attempt. Safaricom's prompt expires
- * after roughly a minute; re-pushing before that would put a second PIN prompt
- * on the guest's handset for the same booking.
+ * How long a pending push blocks another attempt outright. Safaricom's prompt
+ * expires after roughly a minute; re-pushing before that would put a second
+ * PIN prompt on the guest's handset for the same booking.
+ *
+ * Past this window we don't simply assume the prompt died — we ask. See
+ * releaseStaleAttempt.
  */
 const PUSH_COOLDOWN_MS = 90_000;
+
+/** Outcomes Safaricom has ruled on. A late callback must not reopen these. */
+const SETTLED_STATUSES = new Set(["success", "failed"]);
+
+/** Statuses a callback may still settle — `timeout` is our guess, not a verdict. */
+const RESOLVABLE_STATUSES = ["pending", "timeout"] as const;
+
+/**
+ * STK query result codes that mean the prompt is definitively finished, so a
+ * fresh push cannot collide with it.
+ *
+ * Deliberately an allowlist. Anything else — including 1001 ("transaction in
+ * process") and any query error — is treated as possibly still live, because
+ * releasing a prompt that is actually open lets the guest be charged twice.
+ */
+const DEAD_RESULT_CODES = new Set([
+  1, // insufficient balance
+  1032, // cancelled by user
+  1037, // timed out, user unreachable
+  2001, // wrong PIN
+]);
+
+type StaleOutcome = "still_live" | "released" | "already_paid";
+
+/**
+ * Decides whether an existing pending attempt is finished, so a fresh push
+ * can't collide with a prompt that is still open on the guest's handset.
+ *
+ * Simply timing out the row after a fixed window is not safe: the STK request
+ * has no guaranteed lifetime, so releasing on a guess can leave two live
+ * prompts and let the guest be charged twice for one booking. Safaricom is
+ * asked instead, and the attempt is only released on a result code that
+ * definitively means finished.
+ */
+async function releaseStaleAttempt(
+  attempt: typeof payments.$inferSelect,
+  log: { warn: (o: object, m: string) => void; error: (o: object, m: string) => void },
+): Promise<StaleOutcome> {
+  const age = Date.now() - attempt.createdAt.getTime();
+
+  // Inside the cooldown the prompt is almost certainly still on screen.
+  if (age < PUSH_COOLDOWN_MS)
+    return "still_live";
+
+  // No checkout id means the push never reached Safaricom, so no prompt was
+  // ever delivered and there is nothing to collide with.
+  if (!attempt.checkoutRequestId) {
+    await db.update(payments)
+      .set({ status: "timeout", resultDesc: "Push never reached Safaricom" })
+      .where(and(eq(payments.id, attempt.id), eq(payments.status, "pending")));
+    return "released";
+  }
+
+  let status;
+  try {
+    status = await queryStkStatus(attempt.checkoutRequestId);
+  }
+  catch (err) {
+    // Fail closed: unable to prove the old prompt is dead, so don't add another.
+    log.error({ err, paymentId: attempt.id }, "Could not check a stale STK attempt");
+    return "still_live";
+  }
+
+  if (status.resultCode === 0) {
+    // It succeeded while we weren't looking. Settle it rather than charging again.
+    await db.transaction(async (tx) => {
+      const won = await tx.update(payments)
+        .set({
+          status: "success",
+          resultCode: status.resultCode,
+          resultDesc: status.resultDesc,
+        })
+        .where(and(
+          eq(payments.id, attempt.id),
+          inArray(payments.status, RESOLVABLE_STATUSES),
+        ))
+        .returning({ id: payments.id });
+
+      if (won.length === 0)
+        return;
+
+      await tx.update(bookings)
+        .set({ status: "confirmed" })
+        .where(and(
+          eq(bookings.id, attempt.bookingId),
+          eq(bookings.status, "pending_payment"),
+        ));
+    });
+
+    return "already_paid";
+  }
+
+  if (!DEAD_RESULT_CODES.has(status.resultCode)) {
+    log.warn(
+      { paymentId: attempt.id, status },
+      "Stale STK attempt has no terminal result yet; not releasing it",
+    );
+    return "still_live";
+  }
+
+  await db.update(payments)
+    .set({
+      status: "failed",
+      resultCode: status.resultCode,
+      resultDesc: status.resultDesc,
+    })
+    .where(and(eq(payments.id, attempt.id), eq(payments.status, "pending")));
+
+  return "released";
+}
 
 export const initiate: AppRouteHandler<InitiateRoute> = async (c) => {
   const { id } = c.req.valid("param");
@@ -73,35 +186,43 @@ export const initiate: AppRouteHandler<InitiateRoute> = async (c) => {
     );
   }
 
-  const staleBefore = new Date(Date.now() - PUSH_COOLDOWN_MS);
+  const [inFlight] = await db.select().from(payments).where(and(
+    eq(payments.bookingId, booking.id),
+    eq(payments.status, "pending"),
+  ));
 
-  // A pre-check here cannot hold on its own: two overlapping requests both see
-  // "none pending" and both push, so the guest gets two PIN prompts and can be
-  // charged twice. The `payments_one_pending_per_booking` partial unique index
-  // is the real guard — this just produces a clear 409 in the ordinary case.
+  if (inFlight) {
+    const outcome = await releaseStaleAttempt(inFlight, c.var.logger);
+
+    if (outcome === "still_live") {
+      return c.json(
+        { message: "A payment prompt was already sent. Check your phone, or wait a moment before retrying." },
+        HttpStatusCodes.CONFLICT,
+      );
+    }
+
+    if (outcome === "already_paid") {
+      return c.json(
+        { message: "This booking has already been paid for." },
+        HttpStatusCodes.CONFLICT,
+      );
+    }
+  }
+
+  // The pre-check above cannot hold on its own: two overlapping requests both
+  // see "none pending" and both push, so the guest gets two PIN prompts and can
+  // be charged twice. The `payments_one_pending_per_booking` partial unique
+  // index is the real guard — the check just yields a clearer 409 in the
+  // ordinary case.
   let payment;
   try {
-    payment = await db.transaction(async (tx) => {
-      // Release an abandoned prompt so it can't block retries forever; the
-      // unique index only tolerates one *pending* row per booking.
-      await tx.update(payments)
-        .set({ status: "timeout", resultDesc: "No response before the prompt expired" })
-        .where(and(
-          eq(payments.bookingId, booking.id),
-          eq(payments.status, "pending"),
-          lt(payments.createdAt, staleBefore),
-        ));
-
-      // A new row per attempt — payment history is append-only, so a retry
-      // never overwrites the record of a previous failure.
-      const [row] = await tx.insert(payments).values({
-        bookingId: booking.id,
-        phoneNumber: payFrom,
-        amountCents: booking.totalAmountCents,
-      }).returning();
-
-      return row;
-    });
+    // A new row per attempt — payment history is append-only, so a retry never
+    // overwrites the record of a previous failure.
+    [payment] = await db.insert(payments).values({
+      bookingId: booking.id,
+      phoneNumber: payFrom,
+      amountCents: booking.totalAmountCents,
+    }).returning();
   }
   catch (err) {
     if (isUniqueViolation(err)) {
@@ -186,7 +307,12 @@ export const callback: AppRouteHandler<CallbackRoute> = async (c) => {
   // Idempotency: Safaricom re-delivers, and a settled attempt must never be
   // reopened — otherwise a replayed callback could re-confirm a cancelled
   // booking.
-  if (payment.status !== "pending") {
+  //
+  // `timeout` is deliberately NOT settled. It means we stopped waiting, which
+  // is our guess rather than Safaricom's verdict; a late callback saying the
+  // guest paid must still be honoured, or the money is taken and the booking
+  // never confirms.
+  if (SETTLED_STATUSES.has(payment.status)) {
     log.info(
       { paymentId: payment.id, status: payment.status },
       "M-Pesa callback for an already-settled payment; ignored",
@@ -225,7 +351,10 @@ export const callback: AppRouteHandler<CallbackRoute> = async (c) => {
   const settle = (values: Partial<typeof payments.$inferInsert>) =>
     db.update(payments)
       .set(values)
-      .where(and(eq(payments.id, payment.id), eq(payments.status, "pending")))
+      .where(and(
+        eq(payments.id, payment.id),
+        inArray(payments.status, RESOLVABLE_STATUSES),
+      ))
       .returning({ id: payments.id });
 
   if (verified.resultCode !== 0) {
@@ -267,7 +396,10 @@ export const callback: AppRouteHandler<CallbackRoute> = async (c) => {
         resultCode: verified.resultCode,
         resultDesc: verified.resultDesc,
       })
-      .where(and(eq(payments.id, payment.id), eq(payments.status, "pending")))
+      .where(and(
+        eq(payments.id, payment.id),
+        inArray(payments.status, RESOLVABLE_STATUSES),
+      ))
       .returning({ id: payments.id });
 
     // Another callback settled it first; leave its outcome alone.

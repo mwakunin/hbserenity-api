@@ -133,7 +133,7 @@ Non-default dev ports are deliberate: another project on this machine binds
   a bare select would start leaking any correlation id added to the table
   later. Verify both here and in `publicPaymentSchema` when adding columns.
 
-  Because verification covers failures too, a forged *failure* cannot settle
+  Because verification covers failures too, a forged _failure_ cannot settle
   an attempt either. That matters: settling it would make the genuine success
   callback look already-handled, stranding a booking the guest has paid for.
 
@@ -143,10 +143,26 @@ Non-default dev ports are deliberate: another project on this machine binds
   gets two prompts and can be charged twice. Stale pending rows are moved to
   `timeout` before a new insert so an abandoned prompt can't block retries.
 
-  Terminal writes are compare-and-swap (`WHERE status = 'pending'`), so two
-  callbacks racing for one attempt cannot have the loser overwrite the
-  winner — a failure clobbering a verified success would leave the payment
-  recorded failed while its booking stayed confirmed.
+  Terminal writes are compare-and-swap, so two callbacks racing for one
+  attempt cannot have the loser overwrite the winner — a failure clobbering a
+  verified success would leave the payment recorded failed while its booking
+  stayed confirmed.
+
+- **`timeout` is not a settled status.** `success` and `failed` are
+  Safaricom's verdicts and must never be reopened. `timeout` is only *our*
+  guess that we stopped waiting, so a late callback saying the guest paid
+  still settles it — otherwise the money is taken and the booking never
+  confirms. `SETTLED_STATUSES` vs `RESOLVABLE_STATUSES` encode this; keep
+  them apart.
+
+- **Never release a stale attempt on a timer alone.** The STK request has no
+  guaranteed lifetime, so assuming a prompt died after N seconds can leave
+  two live prompts and charge the guest twice. `releaseStaleAttempt()` asks
+  Safaricom and releases only on a result code in `DEAD_RESULT_CODES` — an
+  allowlist, because "not a code I recognise" (including 1001, transaction in
+  process) and any query error both mean *possibly still live*, and it fails
+  closed. If the stale attempt turns out to have succeeded, it is settled and
+  the booking confirmed rather than the guest being charged again.
 
   The endpoint always answers `200 {ResultCode: 0, ResultDesc: "Accepted"}`.
   Any other status makes Safaricom retry indefinitely.
