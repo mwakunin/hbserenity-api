@@ -58,7 +58,9 @@ start if `TEST_DATABASE_URL` is missing. That guard exists so a stray test run
 can never truncate the development database.
 
 docker-compose.yml / dev.sh live at the repo root and stand up local Postgres
-(dev on :5432, test on :5433 with tmpfs — disposable) and Redis (:6379).
+(dev on :5434, test on :5433 with tmpfs — disposable) and Redis (:6380).
+Non-default dev ports are deliberate: another project on this machine binds
+5432 and 6379, so both can run at once.
 
 ## Domain conventions — do not deviate without discussion
 

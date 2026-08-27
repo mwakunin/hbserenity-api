@@ -37,7 +37,7 @@ The API is at http://localhost:9999 — API reference at
 
 | Command                       | What it does                                             |
 | ----------------------------- | -------------------------------------------------------- |
-| `./dev.sh`                    | Start Postgres (:5432 dev, :5433 test) and Redis (:6379) |
+| `./dev.sh`                    | Start Postgres (:5434 dev, :5433 test) and Redis (:6380) |
 | `pnpm dev`                    | Run the API in watch mode                                |
 | `pnpm test`                   | Run the suite against the test database                  |
 | `pnpm lint` / `pnpm lint:fix` | ESLint                                                   |

@@ -7,8 +7,10 @@ services:
       POSTGRES_USER: rentals
       POSTGRES_PASSWORD: rentals
       POSTGRES_DB: rentals_dev
+    # 5434, not the default 5432 — another project on this machine already
+    # binds 5432, and remapping here lets both run at once.
     ports:
-      - "5432:5432"
+      - "5434:5432"
     volumes:
       - postgres_dev_data:/var/lib/postgresql/data
     healthcheck:
@@ -40,8 +42,9 @@ services:
     image: redis:7-alpine
     container_name: rentals-redis-dev
     restart: unless-stopped
+    # 6380 for the same reason as Postgres above.
     ports:
-      - "6379:6379"
+      - "6380:6379"
     volumes:
       - redis_dev_data:/data
     healthcheck:

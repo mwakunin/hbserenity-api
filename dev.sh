@@ -12,6 +12,6 @@ until [ "$(docker inspect -f '{{.State.Health.Status}}' rentals-postgres-dev)" =
 done
 
 echo "Dev services ready:"
-echo "  Postgres (dev):  postgresql://rentals:rentals@localhost:5432/rentals_dev"
+echo "  Postgres (dev):  postgresql://rentals:rentals@localhost:5434/rentals_dev"
 echo "  Postgres (test): postgresql://rentals:rentals@localhost:5433/rentals_test"
-echo "  Redis:           redis://localhost:6379"
+echo "  Redis:           redis://localhost:6380"
