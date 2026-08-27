@@ -13,6 +13,7 @@ import {
   parseCallback,
   queryStkStatus,
   stkPush,
+  verdictFor,
 } from "@/lib/mpesa";
 import { normalizeKenyanPhone } from "@/lib/phone";
 
@@ -40,21 +41,6 @@ const SETTLED_STATUSES = new Set(["success", "failed"]);
 
 /** Statuses a callback may still settle — `timeout` is our guess, not a verdict. */
 const RESOLVABLE_STATUSES = ["pending", "timeout"] as const;
-
-/**
- * STK query result codes that mean the prompt is definitively finished, so a
- * fresh push cannot collide with it.
- *
- * Deliberately an allowlist. Anything else — including 1001 ("transaction in
- * process") and any query error — is treated as possibly still live, because
- * releasing a prompt that is actually open lets the guest be charged twice.
- */
-const DEAD_RESULT_CODES = new Set([
-  1, // insufficient balance
-  1032, // cancelled by user
-  1037, // timed out, user unreachable
-  2001, // wrong PIN
-]);
 
 type StaleOutcome = "still_live" | "released" | "already_paid";
 
@@ -109,7 +95,9 @@ async function releaseStaleAttempt(
     return "still_live";
   }
 
-  if (status.resultCode === 0) {
+  const verdict = verdictFor(status.resultCode);
+
+  if (verdict === "paid") {
     // It succeeded while we weren't looking. Settle it rather than charging again.
     await db.transaction(async (tx) => {
       const won = await tx.update(payments)
@@ -138,7 +126,7 @@ async function releaseStaleAttempt(
     return "already_paid";
   }
 
-  if (!DEAD_RESULT_CODES.has(status.resultCode)) {
+  if (verdict === "indeterminate") {
     log.warn(
       { paymentId: attempt.id, status },
       "Stale STK attempt has no terminal result yet; not releasing it",
@@ -228,13 +216,31 @@ export const initiate: AppRouteHandler<InitiateRoute> = async (c) => {
   // ordinary case.
   let payment;
   try {
-    // A new row per attempt — payment history is append-only, so a retry never
-    // overwrites the record of a previous failure.
-    [payment] = await db.insert(payments).values({
-      bookingId: booking.id,
-      phoneNumber: payFrom,
-      amountCents: booking.totalAmountCents,
-    }).returning();
+    payment = await db.transaction(async (tx) => {
+      // Re-read the booking under a lock. The status check near the top of
+      // this handler is stale by now: releaseStaleAttempt above may have made
+      // network calls to Safaricom, and a callback can confirm the booking in
+      // that window. A succeeded attempt no longer holds the pending-only
+      // unique index, so nothing else would stop us prompting for a booking
+      // that is already paid.
+      const [current] = await tx.select({ status: bookings.status })
+        .from(bookings)
+        .where(eq(bookings.id, booking.id))
+        .for("update");
+
+      if (!current || current.status !== "pending_payment")
+        return null;
+
+      // A new row per attempt — payment history is append-only, so a retry
+      // never overwrites the record of a previous failure.
+      const [row] = await tx.insert(payments).values({
+        bookingId: booking.id,
+        phoneNumber: payFrom,
+        amountCents: booking.totalAmountCents,
+      }).returning();
+
+      return row;
+    });
   }
   catch (err) {
     if (isUniqueViolation(err)) {
@@ -244,6 +250,13 @@ export const initiate: AppRouteHandler<InitiateRoute> = async (c) => {
       );
     }
     throw err;
+  }
+
+  if (!payment) {
+    return c.json(
+      { message: "This booking is no longer awaiting payment." },
+      HttpStatusCodes.CONFLICT,
+    );
   }
 
   // Record that a push is about to go out, BEFORE sending it. From here on a
@@ -266,12 +279,11 @@ export const initiate: AppRouteHandler<InitiateRoute> = async (c) => {
   catch (err) {
     c.var.logger.error({ err, bookingId: booking.id }, "M-Pesa STK push failed");
 
-    // Only settle the attempt when Safaricom actually answered and refused —
-    // then no prompt exists and the row can safely stop holding the guard.
-    // A timeout or network error is NOT proof of that: the request may have
-    // landed and produced a prompt, so the attempt stays pending and keeps
-    // blocking retries.
-    const refusedByDaraja = err instanceof MpesaError && err.status !== undefined;
+    // Only settle when Safaricom definitively refused — then no prompt exists
+    // and the row can stop holding the guard. A timeout, a network error or a
+    // 5xx is NOT proof: the request may have landed and produced a prompt, so
+    // the attempt stays pending and keeps blocking retries.
+    const refusedByDaraja = err instanceof MpesaError && err.definitive;
 
     if (refusedByDaraja) {
       await db.update(payments)
@@ -400,7 +412,20 @@ export const callback: AppRouteHandler<CallbackRoute> = async (c) => {
       ))
       .returning({ id: payments.id });
 
-  if (verified.resultCode !== 0) {
+  const verdict = verdictFor(verified.resultCode);
+
+  if (verdict === "indeterminate") {
+    // e.g. 1001, transaction in process. Settling here would release the
+    // attempt's hold while its prompt is still live, letting a retry add a
+    // second one. Leave it pending for reconciliation.
+    log.warn(
+      { paymentId: payment.id, verified },
+      "Verification is not terminal; leaving the attempt pending",
+    );
+    return c.json(ACK, HttpStatusCodes.OK);
+  }
+
+  if (verdict === "dead") {
     await settle({
       status: "failed",
       resultCode: verified.resultCode,

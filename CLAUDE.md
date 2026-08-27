@@ -173,10 +173,28 @@ Non-default dev ports are deliberate: another project on this machine binds
     that booking's retries is the lesser evil against charging the guest twice.
 
   For the same reason, a failed push only settles the attempt when Safaricom
-  *answered and refused* (`MpesaError.status` present). A timeout or network
+  _answered and refused_ (`MpesaError.status` present). A timeout or network
   error is not proof that no prompt was delivered, so the attempt stays
   pending. And a push that succeeded but whose id could not be stored must
   never be marked failed — that would free a retry to add a second live prompt.
+
+- **One rule decides whether an attempt may stop holding its booking**, and it
+  lives in `verdictFor()` in `lib/mpesa.ts`. `paid` / `dead` / `indeterminate`
+  — and only `dead` (or `paid`) may release. This was previously answered
+  separately in the push-error path, the callback path and the stale-attempt
+  path, which is how 1001 ("transaction in process") ended up terminal in one
+  and still-live in another. **Do not re-derive this decision locally**; every
+  new branch that settles an attempt must route through it.
+
+  The same rule applies to a failed push: `MpesaError.definitive` is true only
+  when Safaricom *answered and refused* (HTTP < 500). A 5xx, a timeout or a
+  network error is not proof that no prompt exists.
+
+  And because a *succeeded* attempt no longer holds the pending-only unique
+  index, the booking status is re-read **under a row lock** immediately before
+  inserting a new attempt. The check at the top of `initiate` is stale by then:
+  `releaseStaleAttempt` makes network calls, and a callback can confirm the
+  booking inside that window.
 
 - **Never release a stale attempt on a timer alone.** The STK request has no
   guaranteed lifetime, so assuming a prompt died after N seconds can leave

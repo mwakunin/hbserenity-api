@@ -32,12 +32,53 @@ export function baseUrl(): string {
   return HOSTS[env.MPESA_ENV];
 }
 
-/** Thrown when Daraja rejects a request or is unreachable. */
+/**
+ * Thrown when Daraja rejects a request or is unreachable.
+ *
+ * `definitive` answers the only question the payment flow cares about: did
+ * Safaricom actually refuse, so no prompt can exist? A 5xx or a timeout is NOT
+ * definitive — the request may have been processed anyway — and treating it as
+ * such would release an attempt whose prompt is live.
+ */
 export class MpesaError extends Error {
-  constructor(message: string, readonly status?: number, readonly body?: unknown) {
+  constructor(
+    message: string,
+    readonly status?: number,
+    readonly body?: unknown,
+    readonly definitive = false,
+  ) {
     super(message);
     this.name = "MpesaError";
   }
+}
+
+/**
+ * What Safaricom's STK result code tells us about a transaction.
+ *
+ * The single source of truth for this question. It used to be answered
+ * differently in three places — the push-error path, the callback path, and
+ * the stale-attempt path — which is how 1001 ("transaction in process") ended
+ * up being treated as a terminal failure by one of them and as still-live by
+ * another. Route every such decision through here.
+ */
+export type TransactionVerdict = "paid" | "dead" | "indeterminate";
+
+/** Codes that definitively mean the transaction is over and no prompt is live. */
+const TERMINAL_FAILURE_CODES = new Set([
+  1, // insufficient balance
+  1032, // cancelled by user
+  1037, // timed out, user unreachable
+  2001, // wrong PIN
+]);
+
+export function verdictFor(resultCode: number): TransactionVerdict {
+  if (resultCode === 0)
+    return "paid";
+
+  // Deliberately an allowlist: an unrecognised code, and 1001 in particular,
+  // means the transaction may still be running. Only "dead" may release an
+  // attempt's hold on the booking.
+  return TERMINAL_FAILURE_CODES.has(resultCode) ? "dead" : "indeterminate";
 }
 
 function requireConfig() {
@@ -187,12 +228,18 @@ export async function stkPush(input: {
 
   // Daraja signals failure both by HTTP status and by a non-zero ResponseCode.
   if (!res.ok || String(body.ResponseCode ?? "") !== "0") {
+    // A 5xx means Safaricom broke, not that it refused — the push may still
+    // have been processed and a prompt delivered. Only a business-level
+    // rejection or a 4xx proves no prompt exists.
+    const definitive = res.status < 500;
+
     throw new MpesaError(
       typeof body.errorMessage === "string"
         ? body.errorMessage
         : `STK push rejected (${res.status})`,
       res.status,
       body,
+      definitive,
     );
   }
 

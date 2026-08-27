@@ -239,6 +239,25 @@ describe("payments routes", () => {
       expect(row.pushDispatchedAt).not.toBeNull();
     });
 
+    // A 5xx means Safaricom broke, not that it refused — the push may have
+    // been processed anyway, so the attempt must keep holding the guard.
+    it("keeps the attempt pending when the push endpoint 500s", async () => {
+      mockFetch(jsonResponse(TOKEN), jsonResponse({ errorMessage: "boom" }, 500));
+      const res = await pay(guest);
+      expect(res.status).toBe(502);
+
+      const [row] = await db.select().from(payments).where(eq(payments.bookingId, bookingId));
+      expect(row.status).toBe("pending");
+    });
+
+    it("settles the attempt on a 4xx, which is a real refusal", async () => {
+      mockFetch(jsonResponse(TOKEN), jsonResponse({ errorMessage: "Bad Request" }, 400));
+      await pay(guest);
+
+      const [row] = await db.select().from(payments).where(eq(payments.bookingId, bookingId));
+      expect(row.status).toBe("failed");
+    });
+
     // An explicit rejection IS proof: Safaricom answered and refused.
     it("settles the attempt when Safaricom explicitly refuses the push", async () => {
       mockFetch(
@@ -329,6 +348,22 @@ describe("payments routes", () => {
 
       // Fail closed: better an unsettled payment than a booking confirmed on
       // an unverifiable claim.
+      expect(await bookingStatus()).toBe("pending_payment");
+      expect((await paymentRow()).status).toBe("pending");
+    });
+
+    // 1001 means the transaction is still running. Settling it would release
+    // the guard and let a retry add a second prompt.
+    it("leaves the attempt pending when verification is non-terminal", async () => {
+      await startPayment();
+      mockFetch(
+        jsonResponse(TOKEN),
+        jsonResponse({ ResultCode: "1001", ResultDesc: "The transaction is being processed" }),
+      );
+
+      const res = await postCallback(failureCallback("ws_CO_test_1", 1001));
+      expect(res.status).toBe(200);
+
       expect(await bookingStatus()).toBe("pending_payment");
       expect((await paymentRow()).status).toBe("pending");
     });
@@ -632,6 +667,45 @@ describe("payments routes", () => {
       expect(res.status).toBe(409);
       const [b] = await db.select().from(bookings).where(eq(bookings.id, bookingId));
       expect(b.status).toBe("confirmed");
+    });
+  });
+
+  describe("booking confirmed mid-flight", () => {
+    // initiate reads the booking, then talks to Safaricom, then inserts. A
+    // callback can confirm the booking in that window — and a succeeded
+    // attempt no longer holds the pending-only index, so nothing else would
+    // stop a prompt going out for an already-paid booking.
+    it("refuses to push for a booking confirmed while we were working", async () => {
+      // Set up a stale attempt so initiate must call Safaricom to check it.
+      mockFetch(jsonResponse(TOKEN), jsonResponse(PUSH_OK));
+      await pay(guest);
+      await db.update(payments)
+        .set({ createdAt: new Date(Date.now() - 120_000) })
+        .where(eq(payments.bookingId, bookingId));
+      vi.unstubAllGlobals();
+      resetTokenCache();
+
+      // Confirm the booking DURING that check — the exact window between the
+      // handler's early status read and its insert.
+      vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (url) => {
+        const u = String(url);
+        if (u.includes("/oauth/"))
+          return jsonResponse(TOKEN);
+        if (u.includes("/stkpushquery/")) {
+          await db.update(bookings)
+            .set({ status: "confirmed" })
+            .where(eq(bookings.id, bookingId));
+          return jsonResponse({ ResultCode: "1032", ResultDesc: "Cancelled" });
+        }
+        return jsonResponse({ ...PUSH_OK, CheckoutRequestID: "ws_CO_test_2" });
+      }));
+
+      const res = await pay(guest);
+
+      // Without the locked re-check this would push for an already-paid booking.
+      expect(res.status).toBe(409);
+      const rows = await db.select().from(payments).where(eq(payments.bookingId, bookingId));
+      expect(rows).toHaveLength(1);
     });
   });
 
