@@ -1,0 +1,506 @@
+import { eq } from "drizzle-orm";
+import { beforeEach, describe, expect, it } from "vitest";
+
+import type { TestUser } from "@/test/helpers";
+
+import app from "@/app";
+import db from "@/db";
+import { bookings, properties } from "@/db/schema";
+import { dayFromNow, makeProperty, nextPhone, resetDb, signIn } from "@/test/helpers";
+
+async function book(
+  user: TestUser,
+  propertyId: string,
+  checkIn: string,
+  checkOut: string,
+  guestCount = 2,
+) {
+  return app.request("/bookings", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...user.headers },
+    body: JSON.stringify({ propertyId, checkIn, checkOut, guestCount }),
+  });
+}
+
+describe("bookings routes", () => {
+  let admin: TestUser;
+  let guest: TestUser;
+  let propertyId: string;
+
+  beforeEach(async () => {
+    await resetDb();
+    admin = await signIn(nextPhone(), "admin");
+    guest = await signIn(nextPhone());
+    const property = await makeProperty(admin.id);
+    propertyId = property.id;
+  });
+
+  describe("creating a booking", () => {
+    it("requires authentication", async () => {
+      const res = await app.request("/bookings", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          propertyId,
+          checkIn: dayFromNow(10),
+          checkOut: dayFromNow(13),
+          guestCount: 2,
+        }),
+      });
+      expect(res.status).toBe(401);
+    });
+
+    it("creates a booking in pending_payment", async () => {
+      const res = await book(guest, propertyId, dayFromNow(10), dayFromNow(13));
+
+      expect(res.status).toBe(201);
+      const json = await res.json();
+      expect(json.status).toBe("pending_payment");
+      expect(json.guestId).toBe(guest.id);
+    });
+
+    it("404s an unknown property", async () => {
+      const res = await book(
+        guest,
+        "4651e634-a530-4484-9b09-9616a28f35e3",
+        dayFromNow(10),
+        dayFromNow(13),
+      );
+      expect(res.status).toBe(404);
+    });
+
+    it("404s a property that is not active", async () => {
+      await db.update(properties)
+        .set({ status: "draft" })
+        .where(eq(properties.id, propertyId));
+
+      const res = await book(guest, propertyId, dayFromNow(10), dayFromNow(13));
+      expect(res.status).toBe(404);
+    });
+
+    it("422s when check-out is not after check-in", async () => {
+      const res = await book(guest, propertyId, dayFromNow(13), dayFromNow(10));
+      expect(res.status).toBe(422);
+    });
+
+    it("422s a same-day check-in and check-out", async () => {
+      const res = await book(guest, propertyId, dayFromNow(10), dayFromNow(10));
+      expect(res.status).toBe(422);
+    });
+
+    it("422s more guests than the property sleeps", async () => {
+      // makeProperty sleeps 6.
+      const res = await book(guest, propertyId, dayFromNow(10), dayFromNow(13), 7);
+
+      expect(res.status).toBe(422);
+      expect(JSON.stringify(await res.json())).toMatch(/sleeps at most 6/);
+    });
+
+    it("accepts exactly the maximum guest count", async () => {
+      const res = await book(guest, propertyId, dayFromNow(10), dayFromNow(13), 6);
+      expect(res.status).toBe(201);
+    });
+
+    it("422s a malformed date", async () => {
+      const res = await app.request("/bookings", {
+        method: "POST",
+        headers: { "content-type": "application/json", ...guest.headers },
+        body: JSON.stringify({
+          propertyId,
+          checkIn: "10/09/2026",
+          checkOut: dayFromNow(13),
+          guestCount: 2,
+        }),
+      });
+      expect(res.status).toBe(422);
+    });
+  });
+
+  describe("pricing", () => {
+    it("computes the total server-side from the property rate", async () => {
+      // makeProperty: 850,000c/night + 150,000c cleaning. 3 nights.
+      const res = await book(guest, propertyId, dayFromNow(10), dayFromNow(13));
+      const json = await res.json();
+
+      expect(json.totalAmountCents).toBe(3 * 850_000 + 150_000);
+    });
+
+    it("ignores a client-supplied total", async () => {
+      const res = await app.request("/bookings", {
+        method: "POST",
+        headers: { "content-type": "application/json", ...guest.headers },
+        body: JSON.stringify({
+          propertyId,
+          checkIn: dayFromNow(10),
+          checkOut: dayFromNow(13),
+          guestCount: 2,
+          totalAmountCents: 100, // "one shilling, please"
+        }),
+      });
+
+      expect(res.status).toBe(201);
+      expect((await res.json()).totalAmountCents).toBe(3 * 850_000 + 150_000);
+    });
+
+    it("snapshots the price — a later rate change does not alter the booking", async () => {
+      const res = await book(guest, propertyId, dayFromNow(10), dayFromNow(13));
+      const original = (await res.json()).totalAmountCents;
+
+      await db.update(properties)
+        .set({ pricePerNightCents: 9_999_900 })
+        .where(eq(properties.id, propertyId));
+
+      const after = await app.request(`/bookings/${(await book(
+        guest,
+        propertyId,
+        dayFromNow(40),
+        dayFromNow(41),
+      ).then(r => r.json())).id}`, { headers: guest.headers });
+
+      // The original booking is untouched by the new rate.
+      const [stored] = await db.select().from(bookings).where(eq(bookings.totalAmountCents, original));
+      expect(stored.totalAmountCents).toBe(original);
+      expect(after.status).toBe(200);
+    });
+
+    it("always produces a whole number of shillings", async () => {
+      const res = await book(guest, propertyId, dayFromNow(10), dayFromNow(17));
+      expect((await res.json()).totalAmountCents % 100).toBe(0);
+    });
+  });
+
+  describe("overlap prevention", () => {
+    it("rejects an overlapping booking with 409", async () => {
+      const first = await book(guest, propertyId, dayFromNow(10), dayFromNow(15));
+      expect(first.status).toBe(201);
+
+      const second = await book(guest, propertyId, dayFromNow(12), dayFromNow(18));
+      expect(second.status).toBe(409);
+    });
+
+    it("rejects a booking fully contained in an existing one", async () => {
+      await book(guest, propertyId, dayFromNow(10), dayFromNow(20));
+      const res = await book(guest, propertyId, dayFromNow(12), dayFromNow(14));
+      expect(res.status).toBe(409);
+    });
+
+    it("rejects a booking that fully contains an existing one", async () => {
+      await book(guest, propertyId, dayFromNow(12), dayFromNow(14));
+      const res = await book(guest, propertyId, dayFromNow(10), dayFromNow(20));
+      expect(res.status).toBe(409);
+    });
+
+    it("rejects an identical booking", async () => {
+      await book(guest, propertyId, dayFromNow(10), dayFromNow(15));
+      const res = await book(guest, propertyId, dayFromNow(10), dayFromNow(15));
+      expect(res.status).toBe(409);
+    });
+
+    it("aLLOWS back-to-back stays where check-in equals the prior check-out", async () => {
+      const first = await book(guest, propertyId, dayFromNow(10), dayFromNow(15));
+      expect(first.status).toBe(201);
+
+      // The 15th is checkout day — it must be immediately bookable.
+      const second = await book(guest, propertyId, dayFromNow(15), dayFromNow(20));
+      expect(second.status).toBe(201);
+    });
+
+    it("allows the same dates on a different property", async () => {
+      const other = await makeProperty(admin.id, { title: "Another place" });
+
+      await book(guest, propertyId, dayFromNow(10), dayFromNow(15));
+      const res = await book(guest, other.id, dayFromNow(10), dayFromNow(15));
+      expect(res.status).toBe(201);
+    });
+
+    it("frees the dates again once a booking is cancelled", async () => {
+      const first = await book(guest, propertyId, dayFromNow(10), dayFromNow(15));
+      const { id } = await first.json();
+
+      const blocked = await book(guest, propertyId, dayFromNow(10), dayFromNow(15));
+      expect(blocked.status).toBe(409);
+
+      const cancelled = await app.request(`/bookings/${id}/cancel`, {
+        method: "POST",
+        headers: guest.headers,
+      });
+      expect(cancelled.status).toBe(200);
+
+      const retry = await book(guest, propertyId, dayFromNow(10), dayFromNow(15));
+      expect(retry.status).toBe(201);
+    });
+
+    it("survives concurrent requests: exactly one wins, the other gets 409", async () => {
+      // The real test of the constraint. Both requests pass any
+      // application-level availability check; only the database can settle it.
+      const results = await Promise.all([
+        book(guest, propertyId, dayFromNow(30), dayFromNow(35)),
+        book(guest, propertyId, dayFromNow(30), dayFromNow(35)),
+      ]);
+
+      const statuses = results.map(r => r.status).sort();
+      expect(statuses).toEqual([201, 409]);
+    });
+
+    it("survives five concurrent requests for the same dates", async () => {
+      const results = await Promise.all(
+        Array.from({ length: 5 }, () =>
+          book(guest, propertyId, dayFromNow(50), dayFromNow(55))),
+      );
+
+      const created = results.filter(r => r.status === 201);
+      const conflicted = results.filter(r => r.status === 409);
+
+      expect(created).toHaveLength(1);
+      expect(conflicted).toHaveLength(4);
+    });
+  });
+
+  describe("blackouts", () => {
+    async function blackout(user: TestUser, start: string, end: string) {
+      return app.request("/blackouts", {
+        method: "POST",
+        headers: { "content-type": "application/json", ...user.headers },
+        body: JSON.stringify({ propertyId, startDate: start, endDate: end }),
+      });
+    }
+
+    it("requires admin", async () => {
+      const res = await blackout(guest, dayFromNow(10), dayFromNow(15));
+      expect(res.status).toBe(403);
+    });
+
+    it("lets an admin block dates", async () => {
+      const res = await blackout(admin, dayFromNow(10), dayFromNow(15));
+      expect(res.status).toBe(201);
+    });
+
+    it("blocks a booking that overlaps a blackout", async () => {
+      await blackout(admin, dayFromNow(10), dayFromNow(15));
+
+      const res = await book(guest, propertyId, dayFromNow(12), dayFromNow(18));
+      expect(res.status).toBe(409);
+    });
+
+    it("allows a booking that starts on the blackout end date", async () => {
+      await blackout(admin, dayFromNow(10), dayFromNow(15));
+
+      const res = await book(guest, propertyId, dayFromNow(15), dayFromNow(18));
+      expect(res.status).toBe(201);
+    });
+
+    it("409s overlapping blackouts", async () => {
+      await blackout(admin, dayFromNow(10), dayFromNow(15));
+      const res = await blackout(admin, dayFromNow(12), dayFromNow(18));
+      expect(res.status).toBe(409);
+    });
+
+    it("422s an end date before the start date", async () => {
+      const res = await blackout(admin, dayFromNow(15), dayFromNow(10));
+      expect(res.status).toBe(422);
+    });
+  });
+
+  describe("availability", () => {
+    it("is public", async () => {
+      const res = await app.request(
+        `/properties/${propertyId}/availability?from=${dayFromNow(0)}&to=${dayFromNow(60)}`,
+      );
+      expect(res.status).toBe(200);
+    });
+
+    it("reports nothing unavailable on an empty calendar", async () => {
+      const res = await app.request(
+        `/properties/${propertyId}/availability?from=${dayFromNow(0)}&to=${dayFromNow(60)}`,
+      );
+      expect((await res.json()).unavailable).toEqual([]);
+    });
+
+    it("reports a booking as unavailable", async () => {
+      await book(guest, propertyId, dayFromNow(10), dayFromNow(15));
+
+      const res = await app.request(
+        `/properties/${propertyId}/availability?from=${dayFromNow(0)}&to=${dayFromNow(60)}`,
+      );
+      const { unavailable } = await res.json();
+
+      expect(unavailable).toHaveLength(1);
+      expect(unavailable[0]).toMatchObject({
+        start: dayFromNow(10),
+        end: dayFromNow(15),
+        reason: "booked",
+      });
+    });
+
+    it("reports blackouts alongside bookings", async () => {
+      await book(guest, propertyId, dayFromNow(10), dayFromNow(15));
+      await app.request("/blackouts", {
+        method: "POST",
+        headers: { "content-type": "application/json", ...admin.headers },
+        body: JSON.stringify({
+          propertyId,
+          startDate: dayFromNow(20),
+          endDate: dayFromNow(25),
+        }),
+      });
+
+      const res = await app.request(
+        `/properties/${propertyId}/availability?from=${dayFromNow(0)}&to=${dayFromNow(60)}`,
+      );
+      const { unavailable } = await res.json();
+
+      expect(unavailable).toHaveLength(2);
+      expect(unavailable.map((u: { reason: string }) => u.reason))
+        .toEqual(["booked", "blackout"]);
+    });
+
+    it("excludes a cancelled booking", async () => {
+      const created = await book(guest, propertyId, dayFromNow(10), dayFromNow(15));
+      const { id } = await created.json();
+
+      await app.request(`/bookings/${id}/cancel`, {
+        method: "POST",
+        headers: guest.headers,
+      });
+
+      const res = await app.request(
+        `/properties/${propertyId}/availability?from=${dayFromNow(0)}&to=${dayFromNow(60)}`,
+      );
+      expect((await res.json()).unavailable).toEqual([]);
+    });
+
+    it("excludes bookings outside the requested window", async () => {
+      await book(guest, propertyId, dayFromNow(50), dayFromNow(55));
+
+      const res = await app.request(
+        `/properties/${propertyId}/availability?from=${dayFromNow(0)}&to=${dayFromNow(20)}`,
+      );
+      expect((await res.json()).unavailable).toEqual([]);
+    });
+
+    it("404s an unknown property", async () => {
+      const res = await app.request(
+        `/properties/4651e634-a530-4484-9b09-9616a28f35e3/availability?from=${dayFromNow(0)}&to=${dayFromNow(60)}`,
+      );
+      expect(res.status).toBe(404);
+    });
+  });
+
+  describe("listing and access control", () => {
+    it("shows a guest only their own bookings", async () => {
+      const other = await signIn(nextPhone());
+
+      await book(guest, propertyId, dayFromNow(10), dayFromNow(15));
+      await book(other, propertyId, dayFromNow(20), dayFromNow(25));
+
+      const res = await app.request("/bookings", { headers: guest.headers });
+      const { data } = await res.json();
+
+      expect(data).toHaveLength(1);
+      expect(data[0].guestId).toBe(guest.id);
+    });
+
+    it("shows an admin every booking", async () => {
+      const other = await signIn(nextPhone());
+
+      await book(guest, propertyId, dayFromNow(10), dayFromNow(15));
+      await book(other, propertyId, dayFromNow(20), dayFromNow(25));
+
+      const res = await app.request("/bookings", { headers: admin.headers });
+      expect((await res.json()).data).toHaveLength(2);
+    });
+
+    it("filters by status", async () => {
+      const created = await book(guest, propertyId, dayFromNow(10), dayFromNow(15));
+      const { id } = await created.json();
+      await book(guest, propertyId, dayFromNow(20), dayFromNow(25));
+
+      await app.request(`/bookings/${id}/cancel`, {
+        method: "POST",
+        headers: guest.headers,
+      });
+
+      const res = await app.request("/bookings?status=cancelled", {
+        headers: guest.headers,
+      });
+      expect((await res.json()).data).toHaveLength(1);
+    });
+
+    it("404s another guest's booking rather than 403", async () => {
+      const other = await signIn(nextPhone());
+      const created = await book(guest, propertyId, dayFromNow(10), dayFromNow(15));
+      const { id } = await created.json();
+
+      const res = await app.request(`/bookings/${id}`, { headers: other.headers });
+      expect(res.status).toBe(404);
+    });
+
+    it("lets an admin read any booking", async () => {
+      const created = await book(guest, propertyId, dayFromNow(10), dayFromNow(15));
+      const { id } = await created.json();
+
+      const res = await app.request(`/bookings/${id}`, { headers: admin.headers });
+      expect(res.status).toBe(200);
+    });
+  });
+
+  describe("cancellation lifecycle", () => {
+    it("cancels a pending_payment booking", async () => {
+      const created = await book(guest, propertyId, dayFromNow(10), dayFromNow(15));
+      const { id } = await created.json();
+
+      const res = await app.request(`/bookings/${id}/cancel`, {
+        method: "POST",
+        headers: guest.headers,
+      });
+
+      expect(res.status).toBe(200);
+      expect((await res.json()).status).toBe("cancelled");
+    });
+
+    it.each(["confirmed", "completed", "cancelled"] as const)(
+      "409s cancelling a booking that is already %s",
+      async (status) => {
+        const created = await book(guest, propertyId, dayFromNow(10), dayFromNow(15));
+        const { id } = await created.json();
+
+        await db.update(bookings).set({ status }).where(eq(bookings.id, id));
+
+        const res = await app.request(`/bookings/${id}/cancel`, {
+          method: "POST",
+          headers: guest.headers,
+        });
+        expect(res.status).toBe(409);
+      },
+    );
+
+    it("404s cancelling another guest's booking", async () => {
+      const other = await signIn(nextPhone());
+      const created = await book(guest, propertyId, dayFromNow(10), dayFromNow(15));
+      const { id } = await created.json();
+
+      const res = await app.request(`/bookings/${id}/cancel`, {
+        method: "POST",
+        headers: other.headers,
+      });
+      expect(res.status).toBe(404);
+    });
+
+    it("is idempotent-safe: a second cancel returns 409, not another success", async () => {
+      const created = await book(guest, propertyId, dayFromNow(10), dayFromNow(15));
+      const { id } = await created.json();
+
+      const first = await app.request(`/bookings/${id}/cancel`, {
+        method: "POST",
+        headers: guest.headers,
+      });
+      const second = await app.request(`/bookings/${id}/cancel`, {
+        method: "POST",
+        headers: guest.headers,
+      });
+
+      expect(first.status).toBe(200);
+      expect(second.status).toBe(409);
+    });
+  });
+});
