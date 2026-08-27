@@ -13,3 +13,10 @@ export const ZOD_ERROR_CODES = {
 };
 
 export const notFoundSchema = createMessageObjectSchema(HttpStatusPhrases.NOT_FOUND);
+export const unauthorizedSchema = createMessageObjectSchema(HttpStatusPhrases.UNAUTHORIZED);
+export const forbiddenSchema = createMessageObjectSchema(HttpStatusPhrases.FORBIDDEN);
+
+/** Returned when a booking collides with an existing one or a blackout. */
+export const conflictSchema = createMessageObjectSchema(
+  "These dates are no longer available",
+);

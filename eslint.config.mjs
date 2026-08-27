@@ -21,7 +21,8 @@ export default antfu({
     }],
     "unicorn/filename-case": ["error", {
       case: "kebabCase",
-      ignore: ["README.md"],
+      // CLAUDE.md and LICENSE are fixed filenames set by their tooling.
+      ignore: ["README.md", "CLAUDE.md", "LICENSE"],
     }],
   },
 });

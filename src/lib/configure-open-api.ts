@@ -9,7 +9,10 @@ export default function configureOpenAPI(app: AppOpenAPI) {
     openapi: "3.0.0",
     info: {
       version: packageJSON.version,
-      title: "Tasks API",
+      title: "Rentals API",
+      description:
+        "Short-term rental booking and management for Kenya. Guests browse and "
+        + "book properties; payment is by M-Pesa STK push.",
     },
   });
 

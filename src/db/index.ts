@@ -1,14 +1,23 @@
-import { drizzle } from "drizzle-orm/libsql";
+import { drizzle } from "drizzle-orm/node-postgres";
+import { Pool } from "pg";
 
 import env from "@/env";
 
+// schema.ts re-exports the Better-Auth-owned tables, so this is the whole model.
 import * as schema from "./schema";
 
+// One driver serves both local Docker Postgres and Neon — Neon speaks the
+// standard wire protocol over TCP, so there's no environment branching here.
+export const pool = new Pool({
+  connectionString: env.DATABASE_URL,
+  // Neon (and most managed Postgres) require TLS; local Docker doesn't offer it.
+  ssl: env.DATABASE_URL.includes("localhost") || env.DATABASE_URL.includes("127.0.0.1")
+    ? false
+    : { rejectUnauthorized: true },
+});
+
 const db = drizzle({
-  connection: {
-    url: env.DATABASE_URL,
-    authToken: env.DATABASE_AUTH_TOKEN,
-  },
+  client: pool,
   casing: "snake_case",
   schema,
 });
