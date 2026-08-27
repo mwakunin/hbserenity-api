@@ -80,6 +80,11 @@ async function releaseStaleAttempt(
 
   // No checkout id means the push never reached Safaricom, so no prompt was
   // ever delivered and there is nothing to collide with.
+  //
+  // This holds only because Daraja calls are bounded by DARAJA_TIMEOUT_MS,
+  // which is well under PUSH_COOLDOWN_MS: an in-flight push has aborted long
+  // before its attempt becomes eligible for release. Without that bound a push
+  // could still be running here, later succeed, and add a second prompt.
   if (!attempt.checkoutRequestId) {
     await db.update(payments)
       .set({ status: "timeout", resultDesc: "Push never reached Safaricom" })

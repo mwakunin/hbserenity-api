@@ -15,6 +15,19 @@ const HOSTS = {
   production: "https://api.safaricom.co.ke",
 } as const;
 
+/**
+ * Hard ceiling on any Daraja call.
+ *
+ * `fetch` has no default timeout, so without this a request can hang
+ * indefinitely. That matters beyond tying up a handler: a push still in flight
+ * has not yet recorded its checkoutRequestId, and the payment flow treats a
+ * pending attempt with no checkout id as "no prompt was ever delivered". This
+ * bound is what makes that true — it must stay comfortably below
+ * PUSH_COOLDOWN_MS in payments.handlers.ts, so any in-flight push has aborted
+ * before a stale attempt becomes eligible for release.
+ */
+export const DARAJA_TIMEOUT_MS = 30_000;
+
 export function baseUrl(): string {
   return HOSTS[env.MPESA_ENV];
 }
@@ -91,7 +104,10 @@ export async function getAccessToken(): Promise<string> {
 
   const res = await fetch(
     `${baseUrl()}/oauth/v1/generate?grant_type=client_credentials`,
-    { headers: { Authorization: `Basic ${basic}` } },
+    {
+      headers: { Authorization: `Basic ${basic}` },
+      signal: AbortSignal.timeout(DARAJA_TIMEOUT_MS),
+    },
   );
 
   if (!res.ok) {
@@ -151,6 +167,7 @@ export async function stkPush(input: {
       "Authorization": `Bearer ${token}`,
       "Content-Type": "application/json",
     },
+    signal: AbortSignal.timeout(DARAJA_TIMEOUT_MS),
     body: JSON.stringify({
       BusinessShortCode: shortcode,
       Password: stkPassword(shortcode, passkey, timestamp),
@@ -210,6 +227,7 @@ export async function queryStkStatus(checkoutRequestId: string): Promise<StkStat
       "Authorization": `Bearer ${token}`,
       "Content-Type": "application/json",
     },
+    signal: AbortSignal.timeout(DARAJA_TIMEOUT_MS),
     body: JSON.stringify({
       BusinessShortCode: shortcode,
       Password: stkPassword(shortcode, passkey, timestamp),

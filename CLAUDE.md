@@ -149,23 +149,35 @@ Non-default dev ports are deliberate: another project on this machine binds
   stayed confirmed.
 
 - **`timeout` is not a settled status.** `success` and `failed` are
-  Safaricom's verdicts and must never be reopened. `timeout` is only *our*
+  Safaricom's verdicts and must never be reopened. `timeout` is only _our_
   guess that we stopped waiting, so a late callback saying the guest paid
   still settles it — otherwise the money is taken and the booking never
   confirms. `SETTLED_STATUSES` vs `RESOLVABLE_STATUSES` encode this; keep
   them apart.
+
+- **Every Daraja call is bounded** by `DARAJA_TIMEOUT_MS`. `fetch` has no
+  default timeout, and this is load-bearing rather than hygiene: a push still
+  in flight has not recorded its `checkoutRequestId`, and a pending attempt
+  with no checkout id is treated as "no prompt was delivered". The timeout must
+  stay well under `PUSH_COOLDOWN_MS` so an in-flight push has aborted before
+  its attempt can be released — otherwise it could succeed afterwards and put a
+  second prompt on the guest's handset.
 
 - **Never release a stale attempt on a timer alone.** The STK request has no
   guaranteed lifetime, so assuming a prompt died after N seconds can leave
   two live prompts and charge the guest twice. `releaseStaleAttempt()` asks
   Safaricom and releases only on a result code in `DEAD_RESULT_CODES` — an
   allowlist, because "not a code I recognise" (including 1001, transaction in
-  process) and any query error both mean *possibly still live*, and it fails
+  process) and any query error both mean _possibly still live_, and it fails
   closed. If the stale attempt turns out to have succeeded, it is settled and
   the booking confirmed rather than the guest being charged again.
 
   The endpoint always answers `200 {ResultCode: 0, ResultDesc: "Accepted"}`.
-  Any other status makes Safaricom retry indefinitely.
+  Any other status makes Safaricom retry indefinitely — which is why the route
+  carries its own validation hook in `payments.index.ts`. The schema tolerates
+  junk inside the envelope, but a body that isn't an object at all (a bare
+  array, a scalar, `null`) fails validation, and the default hook would answer
+  422 and start an endless retry loop.
 
 - **Booking price snapshot**: `bookings.totalAmountCents` is fixed at
   creation time and must never be recalculated from the property's current

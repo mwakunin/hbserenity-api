@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  DARAJA_TIMEOUT_MS,
   darajaTimestamp,
   getAccessToken,
   isAllowedCallbackIp,
@@ -221,6 +222,47 @@ describe("stkPush", () => {
     const body = JSON.parse(String(fetchMock.mock.calls[1][1]?.body));
     expect(body.AccountReference.length).toBeLessThanOrEqual(12);
     expect(body.TransactionDesc.length).toBeLessThanOrEqual(13);
+  });
+});
+
+describe("request timeouts", () => {
+  beforeEach(() => resetTokenCache());
+  afterEach(() => vi.unstubAllGlobals());
+
+  const accepted = {
+    MerchantRequestID: "mr-1",
+    CheckoutRequestID: "ws_CO_123",
+    ResponseCode: "0",
+    CustomerMessage: "ok",
+  };
+
+  // fetch has no default timeout. An unbounded push can still be in flight
+  // when the payment flow decides a stale attempt never reached Safaricom,
+  // which would let a second prompt reach the handset.
+  it("bounds every Daraja call with an abort signal", async () => {
+    const fetchMock = mockFetch(
+      jsonResponse(TOKEN_OK),
+      jsonResponse(accepted),
+      jsonResponse({ ResultCode: "0", ResultDesc: "ok" }),
+    );
+
+    await stkPush({
+      phoneNumber: "+254712345678",
+      amountCents: 100_000,
+      accountReference: "abc",
+      description: "d",
+    });
+    await queryStkStatus("ws_CO_123");
+
+    expect(fetchMock.mock.calls).toHaveLength(3);
+    for (const [, init] of fetchMock.mock.calls)
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("keeps the timeout well below the retry cooldown", () => {
+    // payments.handlers.ts releases a stale attempt only after 90s; the push
+    // must have aborted by then for that to be safe.
+    expect(DARAJA_TIMEOUT_MS).toBeLessThan(90_000);
   });
 });
 

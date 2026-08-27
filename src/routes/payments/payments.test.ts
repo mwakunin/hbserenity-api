@@ -384,6 +384,25 @@ describe("payments routes", () => {
       expect((await paymentRow()).status).toBe("pending");
     });
 
+    // A non-object body fails schema validation outright. Without a per-route
+    // hook the default 422 would put Safaricom into an endless retry loop.
+    it.each([
+      ["a bare array", []],
+      ["null", null],
+      ["a string", "not json"],
+      ["a number", 42],
+      ["a boolean", true],
+    ])("acknowledges %s instead of 422ing", async (_label, body) => {
+      const res = await app.request("/mpesa/callback", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ResultCode: 0, ResultDesc: "Accepted" });
+    });
+
     it("never answers with a non-200, which would make Safaricom retry", async () => {
       await startPayment();
       mockFetch(new Error("boom"));
