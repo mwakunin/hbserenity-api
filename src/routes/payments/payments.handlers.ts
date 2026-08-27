@@ -92,7 +92,13 @@ async function releaseStaleAttempt(
   if (outcome === "paid")
     return "already_paid";
 
-  return outcome === "dead" ? "released" : "still_live";
+  // "already_settled" means someone else finished it while we looked — the
+  // attempt no longer holds, so a retry may proceed. If the winner recorded a
+  // payment, the locked booking re-check before the insert catches it.
+  if (outcome === "dead" || outcome === "already_settled")
+    return "released";
+
+  return "still_live";
 }
 
 export const initiate: AppRouteHandler<InitiateRoute> = async (c) => {

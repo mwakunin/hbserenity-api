@@ -53,30 +53,30 @@ The API is at http://localhost:9999 — API reference at
 
 ## Endpoints
 
-| Path                                   | Auth   | Description                                 |
-| -------------------------------------- | ------ | ------------------------------------------- |
-| `GET /`                                | —      | Index                                       |
-| `GET /health`                          | —      | Readiness probe; pings the database         |
-| `GET /doc`                             | —      | OpenAPI specification                       |
-| `GET /reference`                       | —      | Scalar API documentation                    |
-| `POST /api/auth/phone-number/send-otp` | —      | Request a sign-in OTP                       |
-| `POST /api/auth/phone-number/verify`   | —      | Verify the OTP, receive a session           |
-| `GET /properties`                      | public | Browse active listings (filters, paginated) |
-| `GET /properties/{id}`                 | public | One listing with images and amenities       |
-| `POST /properties`                     | admin  | Create a listing                            |
-| `PATCH /properties/{id}`               | admin  | Update a listing                            |
-| `DELETE /properties/{id}`              | admin  | Delete (409 if it has bookings)             |
-| `GET /properties/{id}/availability`    | public | Taken date ranges                           |
-| `POST /bookings`                       | guest  | Book a property (409 if dates are taken)    |
-| `GET /bookings`                        | guest  | Own bookings; admin sees all                |
-| `GET /bookings/{id}`                   | guest  | One booking                                 |
-| `POST /bookings/{id}/cancel`           | guest  | Cancel a `pending_payment` booking          |
-| `POST /blackouts`                      | admin  | Block dates without faking a booking        |
-| `POST /bookings/{id}/pay`              | guest  | Trigger an M-Pesa STK push                  |
-| `GET /bookings/{id}/payments`          | guest  | Every payment attempt, newest first         |
-| `POST /mpesa/callback`                 | —      | Safaricom result callback (verified)        |
-| `POST /admin/payments/reconcile`       | admin  | Settle payments whose outcome was lost      |
-| `GET /admin/payments/attention`        | admin  | Payments needing a human                    |
+| Path                                   | Auth   | Description                                                                    |
+| -------------------------------------- | ------ | ------------------------------------------------------------------------------ |
+| `GET /`                                | —      | Index                                                                          |
+| `GET /health`                          | —      | Readiness probe; pings the database                                            |
+| `GET /doc`                             | —      | OpenAPI specification                                                          |
+| `GET /reference`                       | —      | Scalar API documentation                                                       |
+| `POST /api/auth/phone-number/send-otp` | —      | Request a sign-in OTP                                                          |
+| `POST /api/auth/phone-number/verify`   | —      | Verify the OTP, receive a session                                              |
+| `GET /properties`                      | public | Browse active listings (filters, paginated)                                    |
+| `GET /properties/{id}`                 | public | One listing with images and amenities                                          |
+| `POST /properties`                     | admin  | Create a listing                                                               |
+| `PATCH /properties/{id}`               | admin  | Update a listing                                                               |
+| `DELETE /properties/{id}`              | admin  | Delete (409 if it has bookings)                                                |
+| `GET /properties/{id}/availability`    | public | Taken date ranges                                                              |
+| `POST /bookings`                       | guest  | Book a property (409 if dates are taken)                                       |
+| `GET /bookings`                        | guest  | Own bookings; admin sees all                                                   |
+| `GET /bookings/{id}`                   | guest  | One booking                                                                    |
+| `POST /bookings/{id}/cancel`           | guest  | Cancel a `pending_payment` booking                                             |
+| `POST /blackouts`                      | admin  | Block dates without faking a booking                                           |
+| `POST /bookings/{id}/pay`              | guest  | Trigger an M-Pesa STK push                                                     |
+| `GET /bookings/{id}/payments`          | guest  | Every payment attempt, newest first                                            |
+| `POST /mpesa/callback`                 | —      | Safaricom result callback (verified)                                           |
+| `POST /admin/payments/reconcile`       | admin  | Settle payments whose outcome was lost (needs external cron &mdash; see below) |
+| `GET /admin/payments/attention`        | admin  | Payments needing a human                                                       |
 
 ## Design notes
 
@@ -112,6 +112,26 @@ change what an existing guest owes. A client-sent total is ignored.
 
 See [CLAUDE.md](./CLAUDE.md) for domain conventions, the Better Auth schema
 regeneration procedure, and what is deliberately not built yet.
+
+## Reconciliation
+
+`POST /admin/payments/reconcile` **does not run on a timer.** Nothing inside
+the API schedules it — point an external cron at it every few minutes before
+going live:
+
+```sh
+*/5 * * * * curl -fsS -X POST https://your-api/admin/payments/reconcile \
+  -H "cookie: <admin session>"
+```
+
+It exists because the payment flow deliberately fails closed: whenever it
+cannot prove what happened to a payment, it leaves the attempt pending rather
+than guessing. Without the sweep, a guest whose callback was lost has paid,
+holds a booking that never confirms, and cannot retry. The endpoint is
+idempotent, so overlapping runs are harmless.
+
+`GET /admin/payments/attention` lists what the sweep cannot fix by itself —
+each entry is real money that may need a refund or a manual confirmation.
 
 ## Testing
 

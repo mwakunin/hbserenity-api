@@ -13,6 +13,7 @@ export const reconcileResponseSchema = z.object({
   examined: z.number().int(),
   paid: z.number().int(),
   failed: z.number().int(),
+  alreadySettled: z.number().int(),
   unresolved: z.number().int(),
   releasedUndispatched: z.number().int(),
 });
@@ -43,7 +44,7 @@ export const reconcile = createRoute({
     + "can. The payment flow deliberately leaves an attempt pending whenever "
     + "it cannot prove what happened, so this is what eventually resolves "
     + "them. Idempotent — safe to run on a schedule and safe to run twice at "
-    + "once.",
+    + "once. NOT scheduled automatically: point an external cron at it.",
   middleware: adminOnly(),
   responses: {
     [HttpStatusCodes.OK]: jsonContent(reconcileResponseSchema, "What the sweep settled"),

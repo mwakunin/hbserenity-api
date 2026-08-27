@@ -27,10 +27,19 @@ export const SETTLED_STATUSES = new Set(["success", "failed"]);
 export const RESOLVABLE_STATUSES = ["pending", "timeout"] as const;
 
 export type SettleOutcome
-  /** Safaricom confirmed payment; the attempt and its booking are settled. */
+  /** This call confirmed payment; the attempt and its booking are settled. */
   = | "paid"
-  /** Safaricom gave a terminal failure; the attempt no longer holds anything. */
+  /** This call recorded a terminal failure; the attempt no longer holds. */
     | "dead"
+  /**
+   * Something else settled it first and this call changed nothing.
+   *
+   * Distinct from `paid`/`dead` on purpose: the winner's outcome is unknown
+   * here, so reporting either would state something that may contradict what
+   * is actually stored. The attempt is settled either way, so it no longer
+   * holds its booking.
+   */
+    | "already_settled"
   /** No verdict available — the attempt keeps holding its booking. */
     | "unresolved";
 
@@ -76,7 +85,7 @@ export async function settleAttemptFromProvider(
   }
 
   if (verdict === "dead") {
-    await db.update(payments)
+    const won = await db.update(payments)
       .set({
         status: "failed",
         resultCode: status.resultCode,
@@ -85,12 +94,14 @@ export async function settleAttemptFromProvider(
       .where(and(
         eq(payments.id, attempt.id),
         inArray(payments.status, RESOLVABLE_STATUSES),
-      ));
+      ))
+      .returning({ id: payments.id });
 
-    return "dead";
+    // Report what this call actually did, not what it intended.
+    return won.length > 0 ? "dead" : "already_settled";
   }
 
-  await db.transaction(async (tx) => {
+  return db.transaction(async (tx) => {
     const won = await tx.update(payments)
       .set({
         status: "success",
@@ -103,9 +114,10 @@ export async function settleAttemptFromProvider(
       ))
       .returning({ id: payments.id });
 
-    // Someone else settled it first; leave their outcome alone.
+    // Someone else settled it first; leave their outcome alone, and don't
+    // claim this call paid anything.
     if (won.length === 0)
-      return;
+      return "already_settled" as const;
 
     // Guarded on status: a booking cancelled while payment was in flight is
     // NOT resurrected. That surfaces as money against a cancelled booking,
@@ -116,7 +128,7 @@ export async function settleAttemptFromProvider(
         eq(bookings.id, attempt.bookingId),
         eq(bookings.status, "pending_payment"),
       ));
-  });
 
-  return "paid";
+    return "paid" as const;
+  });
 }

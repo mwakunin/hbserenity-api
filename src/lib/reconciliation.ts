@@ -1,9 +1,9 @@
-import { and, eq, isNotNull, isNull, lt, sql } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, isNull, lt, sql } from "drizzle-orm";
 
 import db from "@/db";
 import { bookings, payments } from "@/db/schema";
 
-import { settleAttemptFromProvider } from "./payment-settlement";
+import { RESOLVABLE_STATUSES, settleAttemptFromProvider } from "./payment-settlement";
 
 /**
  * The payment flow deliberately fails closed: whenever it cannot prove what
@@ -30,6 +30,8 @@ export interface ReconcileSummary {
   examined: number;
   paid: number;
   failed: number;
+  /** Settled by a concurrent callback or runner before this pass got to it. */
+  alreadySettled: number;
   unresolved: number;
 }
 
@@ -49,7 +51,11 @@ export async function reconcilePayments(log: Logger): Promise<ReconcileSummary> 
   const olderThan = new Date(Date.now() - MIN_AGE_MS);
 
   const stale = await db.select().from(payments).where(and(
-    eq(payments.status, "pending"),
+    // The same set the settlement module treats as still resolvable.
+    // `timeout` records that we stopped waiting, not that Safaricom ruled, so
+    // an aged timeout row with a reference must still be swept — a late
+    // callback could settle it, and so should this.
+    inArray(payments.status, RESOLVABLE_STATUSES),
     isNotNull(payments.checkoutRequestId),
     lt(payments.createdAt, olderThan),
   ));
@@ -58,6 +64,7 @@ export async function reconcilePayments(log: Logger): Promise<ReconcileSummary> 
     examined: stale.length,
     paid: 0,
     failed: 0,
+    alreadySettled: 0,
     unresolved: 0,
   };
 
@@ -65,10 +72,14 @@ export async function reconcilePayments(log: Logger): Promise<ReconcileSummary> 
   for (const attempt of stale) {
     const outcome = await settleAttemptFromProvider(attempt, log);
 
+    // Counted by what this pass actually changed, so the admin summary can't
+    // claim a settlement that a concurrent runner or callback really made.
     if (outcome === "paid")
       summary.paid += 1;
     else if (outcome === "dead")
       summary.failed += 1;
+    else if (outcome === "already_settled")
+      summary.alreadySettled += 1;
     else
       summary.unresolved += 1;
   }
@@ -125,7 +136,8 @@ export async function paymentsNeedingAttention(): Promise<AttentionItem[]> {
         AND ${payments.checkoutRequestId} IS NULL)
       OR ${payments.resultDesc} ILIKE ${DUPLICATE_FLAG}
       OR (${payments.status} = 'success' AND ${bookings.status} = 'cancelled')
-      OR (${payments.status} = 'pending' AND ${payments.createdAt} < ${stuckBefore})
+      OR (${payments.status} IN ('pending', 'timeout')
+        AND ${payments.createdAt} < ${stuckBefore})
     `)
     .orderBy(payments.createdAt);
 

@@ -206,7 +206,8 @@ Non-default dev ports are deliberate: another project on this machine binds
 - **Reconciliation is what makes failing closed safe.** The payment flow
   deliberately leaves an attempt pending whenever it cannot prove what
   happened. `lib/reconciliation.ts` is what eventually resolves those:
-  `POST /admin/payments/reconcile` sweeps and settles, and
+  `POST /admin/payments/reconcile` sweeps and settles (nothing schedules it —
+  point an external cron at it), and
   `GET /admin/payments/attention` lists what it cannot fix — a push dispatched
   with no reference, a possible duplicate charge, money against a cancelled
   booking, an attempt stuck pending. Both are admin-only and the sweep is
