@@ -15,6 +15,11 @@ import {
   stkPush,
   verdictFor,
 } from "@/lib/mpesa";
+import {
+  RESOLVABLE_STATUSES,
+  settleAttemptFromProvider,
+  SETTLED_STATUSES,
+} from "@/lib/payment-settlement";
 import { normalizeKenyanPhone } from "@/lib/phone";
 
 import type {
@@ -35,12 +40,6 @@ const ACK = { ResultCode: 0, ResultDesc: "Accepted" } as const;
  * releaseStaleAttempt.
  */
 const PUSH_COOLDOWN_MS = 90_000;
-
-/** Outcomes Safaricom has ruled on. A late callback must not reopen these. */
-const SETTLED_STATUSES = new Set(["success", "failed"]);
-
-/** Statuses a callback may still settle — `timeout` is our guess, not a verdict. */
-const RESOLVABLE_STATUSES = ["pending", "timeout"] as const;
 
 type StaleOutcome = "still_live" | "released" | "already_paid";
 
@@ -85,64 +84,21 @@ async function releaseStaleAttempt(
     return "released";
   }
 
-  let status;
-  try {
-    status = await queryStkStatus(attempt.checkoutRequestId);
-  }
-  catch (err) {
-    // Fail closed: unable to prove the old prompt is dead, so don't add another.
-    log.error({ err, paymentId: attempt.id }, "Could not check a stale STK attempt");
-    return "still_live";
-  }
+  // Delegated so the retry path, the callback and reconciliation all apply
+  // exactly the same rules — keeping this decision in one place is what stops
+  // them drifting apart.
+  const outcome = await settleAttemptFromProvider(attempt, log);
 
-  const verdict = verdictFor(status.resultCode);
-
-  if (verdict === "paid") {
-    // It succeeded while we weren't looking. Settle it rather than charging again.
-    await db.transaction(async (tx) => {
-      const won = await tx.update(payments)
-        .set({
-          status: "success",
-          resultCode: status.resultCode,
-          resultDesc: status.resultDesc,
-        })
-        .where(and(
-          eq(payments.id, attempt.id),
-          inArray(payments.status, RESOLVABLE_STATUSES),
-        ))
-        .returning({ id: payments.id });
-
-      if (won.length === 0)
-        return;
-
-      await tx.update(bookings)
-        .set({ status: "confirmed" })
-        .where(and(
-          eq(bookings.id, attempt.bookingId),
-          eq(bookings.status, "pending_payment"),
-        ));
-    });
-
+  if (outcome === "paid")
     return "already_paid";
-  }
 
-  if (verdict === "indeterminate") {
-    log.warn(
-      { paymentId: attempt.id, status },
-      "Stale STK attempt has no terminal result yet; not releasing it",
-    );
-    return "still_live";
-  }
+  // "already_settled" means someone else finished it while we looked — the
+  // attempt no longer holds, so a retry may proceed. If the winner recorded a
+  // payment, the locked booking re-check before the insert catches it.
+  if (outcome === "dead" || outcome === "already_settled")
+    return "released";
 
-  await db.update(payments)
-    .set({
-      status: "failed",
-      resultCode: status.resultCode,
-      resultDesc: status.resultDesc,
-    })
-    .where(and(eq(payments.id, attempt.id), eq(payments.status, "pending")));
-
-  return "released";
+  return "still_live";
 }
 
 export const initiate: AppRouteHandler<InitiateRoute> = async (c) => {

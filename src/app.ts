@@ -1,5 +1,6 @@
 import configureOpenAPI from "@/lib/configure-open-api";
 import createApp from "@/lib/create-app";
+import admin from "@/routes/admin/admin.index";
 import bookings from "@/routes/bookings/bookings.index";
 import health from "@/routes/health.route";
 import index from "@/routes/index.route";
@@ -16,6 +17,7 @@ const routes = [
   properties,
   bookings,
   payments,
+  admin,
 ] as const;
 
 routes.forEach((route) => {
