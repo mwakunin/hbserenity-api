@@ -22,6 +22,13 @@
       "when": 1787821099914,
       "tag": "0002_bedroom_type_consistency",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1787847130321,
+      "tag": "0003_one_pending_payment_per_booking",
+      "breakpoints": true
     }
   ]
 }

@@ -1,4 +1,4 @@
-import { and, desc, eq, gt } from "drizzle-orm";
+import { and, desc, eq, lt } from "drizzle-orm";
 import * as HttpStatusCodes from "stoker/http-status-codes";
 import * as HttpStatusPhrases from "stoker/http-status-phrases";
 
@@ -6,6 +6,7 @@ import type { AppRouteHandler } from "@/lib/types";
 
 import db from "@/db";
 import { bookings, payments } from "@/db/schema";
+import { isUniqueViolation } from "@/lib/db-errors";
 import {
   isAllowedCallbackIp,
   MpesaError,
@@ -72,29 +73,45 @@ export const initiate: AppRouteHandler<InitiateRoute> = async (c) => {
     );
   }
 
-  // Don't stack PIN prompts on the guest's handset.
-  const [inFlight] = await db.select({ id: payments.id })
-    .from(payments)
-    .where(and(
-      eq(payments.bookingId, booking.id),
-      eq(payments.status, "pending"),
-      gt(payments.createdAt, new Date(Date.now() - PUSH_COOLDOWN_MS)),
-    ));
+  const staleBefore = new Date(Date.now() - PUSH_COOLDOWN_MS);
 
-  if (inFlight) {
-    return c.json(
-      { message: "A payment prompt was already sent. Check your phone, or wait a moment before retrying." },
-      HttpStatusCodes.CONFLICT,
-    );
+  // A pre-check here cannot hold on its own: two overlapping requests both see
+  // "none pending" and both push, so the guest gets two PIN prompts and can be
+  // charged twice. The `payments_one_pending_per_booking` partial unique index
+  // is the real guard — this just produces a clear 409 in the ordinary case.
+  let payment;
+  try {
+    payment = await db.transaction(async (tx) => {
+      // Release an abandoned prompt so it can't block retries forever; the
+      // unique index only tolerates one *pending* row per booking.
+      await tx.update(payments)
+        .set({ status: "timeout", resultDesc: "No response before the prompt expired" })
+        .where(and(
+          eq(payments.bookingId, booking.id),
+          eq(payments.status, "pending"),
+          lt(payments.createdAt, staleBefore),
+        ));
+
+      // A new row per attempt — payment history is append-only, so a retry
+      // never overwrites the record of a previous failure.
+      const [row] = await tx.insert(payments).values({
+        bookingId: booking.id,
+        phoneNumber: payFrom,
+        amountCents: booking.totalAmountCents,
+      }).returning();
+
+      return row;
+    });
   }
-
-  // A new row per attempt — payment history is append-only, so a retry never
-  // overwrites the record of a previous failure.
-  const [payment] = await db.insert(payments).values({
-    bookingId: booking.id,
-    phoneNumber: payFrom,
-    amountCents: booking.totalAmountCents,
-  }).returning();
+  catch (err) {
+    if (isUniqueViolation(err)) {
+      return c.json(
+        { message: "A payment prompt was already sent. Check your phone, or wait a moment before retrying." },
+        HttpStatusCodes.CONFLICT,
+      );
+    }
+    throw err;
+  }
 
   try {
     const push = await stkPush({
@@ -177,21 +194,52 @@ export const callback: AppRouteHandler<CallbackRoute> = async (c) => {
     return c.json(ACK, HttpStatusCodes.OK);
   }
 
-  if (parsed.resultCode !== 0) {
-    await db.update(payments)
-      .set({
-        status: "failed",
-        resultCode: parsed.resultCode,
-        resultDesc: parsed.resultDesc,
-      })
-      .where(eq(payments.id, payment.id));
+  // Safaricom is the authority on whether money moved — for BOTH outcomes.
+  //
+  // Verifying only the success path would leave a hole: anyone able to forge a
+  // *failure* could settle the attempt without proof, and the genuine success
+  // callback would then be ignored as already-settled, stranding a booking the
+  // guest has actually paid for.
+  let verified;
+  try {
+    verified = await queryStkStatus(parsed.checkoutRequestId);
+  }
+  catch (err) {
+    // Fail closed: leave the payment pending so reconciliation can settle it.
+    // Acting on an unverifiable callback is the one outcome worth avoiding.
+    log.error(
+      { err, paymentId: payment.id },
+      "Could not verify M-Pesa payment with Safaricom; left pending",
+    );
+    return c.json(ACK, HttpStatusCodes.OK);
+  }
+
+  /**
+   * Settles the attempt only while it is still pending.
+   *
+   * The status filter makes this a compare-and-swap: two callbacks for one
+   * checkout request can both read the row as pending, and without it the
+   * loser would overwrite the winner — a failure clobbering a verified
+   * success while its booking stayed confirmed.
+   */
+  const settle = (values: Partial<typeof payments.$inferInsert>) =>
+    db.update(payments)
+      .set(values)
+      .where(and(eq(payments.id, payment.id), eq(payments.status, "pending")))
+      .returning({ id: payments.id });
+
+  if (verified.resultCode !== 0) {
+    await settle({
+      status: "failed",
+      resultCode: verified.resultCode,
+      resultDesc: verified.resultDesc,
+    });
 
     return c.json(ACK, HttpStatusCodes.OK);
   }
 
-  // The callback claims success. Check the amount against what we asked for
-  // before believing it — a forged callback would otherwise confirm a booking
-  // for any amount at all.
+  // Safaricom says the money moved. Cross-check the amount the callback
+  // reported against what we asked for before confirming anything.
   if (parsed.amountCents != null && parsed.amountCents !== payment.amountCents) {
     log.error(
       {
@@ -202,60 +250,29 @@ export const callback: AppRouteHandler<CallbackRoute> = async (c) => {
       "M-Pesa callback amount does not match the booking; refusing to confirm",
     );
 
-    await db.update(payments)
-      .set({
-        status: "failed",
-        resultCode: parsed.resultCode,
-        resultDesc: "Amount mismatch between callback and booking",
-      })
-      .where(eq(payments.id, payment.id));
-
-    return c.json(ACK, HttpStatusCodes.OK);
-  }
-
-  // Safaricom is the authority on whether money actually moved. Ask it
-  // directly rather than taking an unauthenticated POST at its word.
-  let verified;
-  try {
-    verified = await queryStkStatus(parsed.checkoutRequestId);
-  }
-  catch (err) {
-    // Fail closed: leave the payment pending so reconciliation can settle it.
-    // Confirming here on an unverifiable callback is the one outcome worth
-    // avoiding entirely.
-    log.error(
-      { err, paymentId: payment.id },
-      "Could not verify M-Pesa payment with Safaricom; left pending",
-    );
-    return c.json(ACK, HttpStatusCodes.OK);
-  }
-
-  if (verified.resultCode !== 0) {
-    log.warn(
-      { paymentId: payment.id, verified },
-      "Callback claimed success but Safaricom disagrees; marking failed",
-    );
-
-    await db.update(payments)
-      .set({
-        status: "failed",
-        resultCode: verified.resultCode,
-        resultDesc: verified.resultDesc,
-      })
-      .where(eq(payments.id, payment.id));
+    await settle({
+      status: "failed",
+      resultCode: verified.resultCode,
+      resultDesc: "Amount mismatch between callback and booking",
+    });
 
     return c.json(ACK, HttpStatusCodes.OK);
   }
 
   await db.transaction(async (tx) => {
-    await tx.update(payments)
+    const won = await tx.update(payments)
       .set({
         status: "success",
         mpesaReceiptNumber: parsed.mpesaReceiptNumber,
-        resultCode: parsed.resultCode,
-        resultDesc: parsed.resultDesc,
+        resultCode: verified.resultCode,
+        resultDesc: verified.resultDesc,
       })
-      .where(eq(payments.id, payment.id));
+      .where(and(eq(payments.id, payment.id), eq(payments.status, "pending")))
+      .returning({ id: payments.id });
+
+    // Another callback settled it first; leave its outcome alone.
+    if (won.length === 0)
+      return;
 
     // Guarded on the current status: if the guest cancelled while the payment
     // was in flight, the money is recorded but the booking is NOT resurrected.
@@ -289,7 +306,24 @@ export const listForBooking: AppRouteHandler<ListForBookingRoute> = async (c) =>
     );
   }
 
-  const rows = await db.select().from(payments).where(eq(payments.bookingId, id)).orderBy(desc(payments.createdAt));
+  // Explicit column list, not select() — checkoutRequestId and
+  // merchantRequestId must never reach the client, and a bare select would
+  // start leaking any correlation id added to the table later.
+  const rows = await db.select({
+    id: payments.id,
+    bookingId: payments.bookingId,
+    provider: payments.provider,
+    phoneNumber: payments.phoneNumber,
+    amountCents: payments.amountCents,
+    status: payments.status,
+    mpesaReceiptNumber: payments.mpesaReceiptNumber,
+    resultDesc: payments.resultDesc,
+    createdAt: payments.createdAt,
+    updatedAt: payments.updatedAt,
+  })
+    .from(payments)
+    .where(eq(payments.bookingId, id))
+    .orderBy(desc(payments.createdAt));
 
   return c.json({ data: rows }, HttpStatusCodes.OK);
 };

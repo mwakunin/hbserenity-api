@@ -312,6 +312,11 @@ describe("payments routes", () => {
 
     it("marks the attempt failed when the guest cancels the prompt", async () => {
       await startPayment();
+      // Failures are verified with Safaricom too, not taken on trust.
+      mockFetch(
+        jsonResponse(TOKEN),
+        jsonResponse({ ResultCode: "1032", ResultDesc: "Request cancelled by user" }),
+      );
 
       const res = await postCallback(failureCallback("ws_CO_test_1"));
       expect(res.status).toBe(200);
@@ -320,6 +325,17 @@ describe("payments routes", () => {
       const row = await paymentRow();
       expect(row.status).toBe("failed");
       expect(row.resultCode).toBe(1032);
+    });
+
+    it("leaves a failure callback pending when Safaricom cannot be reached", async () => {
+      await startPayment();
+      mockFetch(new Error("safaricom down"));
+
+      await postCallback(failureCallback("ws_CO_test_1"));
+
+      // Fail closed both ways: an unverifiable failure must not settle the row
+      // either, or a forged one could strand a payment that actually succeeded.
+      expect((await paymentRow()).status).toBe("pending");
     });
 
     it("is idempotent — a redelivered callback confirms only once", async () => {
@@ -374,6 +390,98 @@ describe("payments routes", () => {
 
       const res = await postCallback(successCallback("ws_CO_test_1", totalCents / 100));
       expect(res.status).toBe(200);
+    });
+  });
+
+  describe("concurrency", () => {
+    /** Answers by endpoint, so parallel calls don't depend on ordering. */
+    function routedFetch(queryResult: string) {
+      const fn = vi.fn<typeof fetch>(async (url) => {
+        const u = String(url);
+        if (u.includes("/oauth/"))
+          return jsonResponse(TOKEN);
+        if (u.includes("/stkpushquery/"))
+          return jsonResponse({ ResultCode: queryResult, ResultDesc: "d" });
+        return jsonResponse(PUSH_OK);
+      });
+      vi.stubGlobal("fetch", fn);
+      return fn;
+    }
+
+    it("sends only one PIN prompt when two pay requests overlap", async () => {
+      const fetchMock = routedFetch("0");
+
+      const results = await Promise.all([pay(guest), pay(guest)]);
+      const statuses = results.map(r => r.status).sort();
+
+      // Otherwise the guest gets two prompts and can be charged twice.
+      expect(statuses).toEqual([202, 409]);
+
+      const pushes = fetchMock.mock.calls
+        .filter(([u]) => String(u).includes("/stkpush/"));
+      expect(pushes).toHaveLength(1);
+
+      const rows = await db.select().from(payments).where(eq(payments.bookingId, bookingId));
+      expect(rows).toHaveLength(1);
+    });
+
+    it("does not let a losing callback overwrite a settled outcome", async () => {
+      routedFetch("0");
+      await pay(guest);
+      vi.unstubAllGlobals();
+      resetTokenCache();
+
+      // Success and failure for the same checkout request, racing.
+      routedFetch("0");
+      await Promise.all([
+        postCallback(successCallback("ws_CO_test_1", totalCents / 100)),
+        postCallback(failureCallback("ws_CO_test_1")),
+      ]);
+
+      const [row] = await db.select().from(payments).where(eq(payments.bookingId, bookingId));
+      const [b] = await db.select().from(bookings).where(eq(bookings.id, bookingId));
+
+      // Whichever settles first wins, but the pair must stay consistent — a
+      // payment recorded failed against a confirmed booking would corrupt
+      // reconciliation.
+      expect(["success", "failed"]).toContain(row.status);
+      if (row.status === "success")
+        expect(b.status).toBe("confirmed");
+      else
+        expect(b.status).toBe("pending_payment");
+    });
+  });
+
+  describe("forged callback resistance", () => {
+    it("does not hand the callback identifier to the booking owner", async () => {
+      mockFetch(jsonResponse(TOKEN), jsonResponse(PUSH_OK));
+      await pay(guest);
+
+      const res = await app.request(`/bookings/${bookingId}/payments`, {
+        headers: guest.headers,
+      });
+
+      expect(JSON.stringify(await res.json())).not.toContain("ws_CO_test_1");
+    });
+
+    it("cannot be poisoned by a forged failure callback", async () => {
+      mockFetch(jsonResponse(TOKEN), jsonResponse(PUSH_OK));
+      await pay(guest);
+      vi.unstubAllGlobals();
+      resetTokenCache();
+
+      // Attacker claims the payment failed. Safaricom says otherwise.
+      mockFetch(jsonResponse(TOKEN), jsonResponse({ ResultCode: "0", ResultDesc: "ok" }));
+      await postCallback(failureCallback("ws_CO_test_1"));
+      vi.unstubAllGlobals();
+      resetTokenCache();
+
+      // The genuine success callback must still be able to confirm.
+      mockFetch(jsonResponse(TOKEN), jsonResponse({ ResultCode: "0", ResultDesc: "ok" }));
+      await postCallback(successCallback("ws_CO_test_1", totalCents / 100));
+
+      const [b] = await db.select().from(bookings).where(eq(bookings.id, bookingId));
+      expect(b.status).toBe("confirmed");
     });
   });
 

@@ -304,6 +304,17 @@ export const payments = pgTable(
     index("payments_booking_idx").on(table.bookingId),
     uniqueIndex("payments_checkout_request_idx").on(table.checkoutRequestId),
     wholeShillings("payments_amount_whole", table.amountCents),
+    // At most one in-flight attempt per booking. A check-then-insert in the
+    // handler cannot guarantee this — two concurrent requests both read "none
+    // pending" and both push, putting two PIN prompts on the guest's handset
+    // and letting them be charged twice. A partial unique index makes the
+    // second insert fail outright.
+    //
+    // Stale attempts are moved to `timeout` before a new insert, so an
+    // abandoned prompt can't block retries forever.
+    uniqueIndex("payments_one_pending_per_booking")
+      .on(table.bookingId)
+      .where(sql`${table.status} = 'pending'`),
   ],
 );
 

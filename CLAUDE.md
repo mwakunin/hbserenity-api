@@ -125,9 +125,28 @@ Non-default dev ports are deliberate: another project on this machine binds
      Safaricom agrees. If that query fails, the payment is left `pending`
      rather than confirmed — fail closed.
 
-  It also **never returns `checkoutRequestId` to the client**. That id is all
-  the callback needs to identify a payment, so handing it over would let a
-  guest start a real push, cancel it, and forge their own confirmation.
+  It also **never returns `checkoutRequestId` (or `merchantRequestId`) to the
+  client, from any endpoint**. Those ids are all the callback needs to
+  identify a payment, so handing one over would let a guest start a real push,
+  cancel it, and forge a result for it. The payment-history endpoint selects
+  an explicit column list rather than `select()` for exactly this reason —
+  a bare select would start leaking any correlation id added to the table
+  later. Verify both here and in `publicPaymentSchema` when adding columns.
+
+  Because verification covers failures too, a forged *failure* cannot settle
+  an attempt either. That matters: settling it would make the genuine success
+  callback look already-handled, stranding a booking the guest has paid for.
+
+  **At most one pending attempt per booking**, enforced by the partial unique
+  index `payments_one_pending_per_booking`. A check-then-insert cannot hold —
+  two concurrent requests both read "none pending" and both push, so the guest
+  gets two prompts and can be charged twice. Stale pending rows are moved to
+  `timeout` before a new insert so an abandoned prompt can't block retries.
+
+  Terminal writes are compare-and-swap (`WHERE status = 'pending'`), so two
+  callbacks racing for one attempt cannot have the loser overwrite the
+  winner — a failure clobbering a verified success would leave the payment
+  recorded failed while its booking stayed confirmed.
 
   The endpoint always answers `200 {ResultCode: 0, ResultDesc: "Accepted"}`.
   Any other status makes Safaricom retry indefinitely.

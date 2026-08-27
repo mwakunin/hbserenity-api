@@ -58,6 +58,27 @@ export const mpesaAckSchema = z.object({
   ResultDesc: z.string(),
 });
 
+/**
+ * What a payment attempt looks like to its owner.
+ *
+ * `checkoutRequestId` and `merchantRequestId` are deliberately absent. They
+ * are how the callback identifies a payment, so anyone holding one can forge a
+ * result for it — returning them here would undo the same omission that
+ * `initiatePaymentResponseSchema` is careful about.
+ */
+export const publicPaymentSchema = z.object({
+  id: z.string(),
+  bookingId: z.string(),
+  provider: z.string(),
+  phoneNumber: z.string(),
+  amountCents: z.number().int(),
+  status: z.enum(["pending", "success", "failed", "timeout"]),
+  mpesaReceiptNumber: z.string().nullable(),
+  resultDesc: z.string().nullable(),
+  createdAt: z.date(),
+  updatedAt: z.date(),
+});
+
 export const listPaymentsResponseSchema = z.object({
-  data: z.array(selectPaymentSchema),
+  data: z.array(publicPaymentSchema),
 });
