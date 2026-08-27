@@ -228,6 +228,29 @@ describe("payments routes", () => {
       expect((await pay(guest)).status).toBe(502);
     });
 
+    // A network error is not proof that no prompt was delivered, so the
+    // attempt must keep holding the guard rather than being settled.
+    it("keeps the attempt pending when the push errors without an answer", async () => {
+      mockFetch(jsonResponse(TOKEN), new Error("ECONNREFUSED"));
+      await pay(guest);
+
+      const [row] = await db.select().from(payments).where(eq(payments.bookingId, bookingId));
+      expect(row.status).toBe("pending");
+      expect(row.pushDispatchedAt).not.toBeNull();
+    });
+
+    // An explicit rejection IS proof: Safaricom answered and refused.
+    it("settles the attempt when Safaricom explicitly refuses the push", async () => {
+      mockFetch(
+        jsonResponse(TOKEN),
+        jsonResponse({ ResponseCode: "1", errorMessage: "Invalid Amount" }),
+      );
+      await pay(guest);
+
+      const [row] = await db.select().from(payments).where(eq(payments.bookingId, bookingId));
+      expect(row.status).toBe("failed");
+    });
+
     it.each(["confirmed", "cancelled", "completed"] as const)(
       "409s paying a booking that is already %s",
       async (status) => {
@@ -518,13 +541,37 @@ describe("payments routes", () => {
       expect(b.status).toBe("pending_payment");
     });
 
+    // A prompt that Safaricom accepted but whose id we never stored (crash, or
+    // a failed write) must never be released — a retry would put a second live
+    // prompt on the handset.
+    it("holds an attempt whose push was dispatched but never recorded", async () => {
+      mockFetch(jsonResponse(TOKEN), jsonResponse(PUSH_OK));
+      await pay(guest);
+
+      // Simulate dying between the accepted push and storing its id.
+      await db.update(payments)
+        .set({ status: "pending", checkoutRequestId: null })
+        .where(eq(payments.bookingId, bookingId));
+      await backdate();
+      vi.unstubAllGlobals();
+      resetTokenCache();
+
+      mockFetch(jsonResponse(TOKEN), jsonResponse(PUSH_OK));
+      const res = await pay(guest);
+
+      expect(res.status).toBe(409);
+      const rows = await db.select().from(payments).where(eq(payments.bookingId, bookingId));
+      expect(rows).toHaveLength(1);
+    });
+
     it("releases an attempt whose push never reached Safaricom", async () => {
       // stkPush failed, so the row has no checkoutRequestId and no prompt was
       // ever delivered — nothing for a retry to collide with.
       mockFetch(jsonResponse(TOKEN), new Error("ECONNREFUSED"));
       await pay(guest);
+      // No push was ever dispatched, so the marker is absent too.
       await db.update(payments)
-        .set({ status: "pending", checkoutRequestId: null })
+        .set({ status: "pending", checkoutRequestId: null, pushDispatchedAt: null })
         .where(eq(payments.bookingId, bookingId));
       await backdate();
       vi.unstubAllGlobals();

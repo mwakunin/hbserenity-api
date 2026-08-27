@@ -78,16 +78,23 @@ async function releaseStaleAttempt(
   if (age < PUSH_COOLDOWN_MS)
     return "still_live";
 
-  // No checkout id means the push never reached Safaricom, so no prompt was
-  // ever delivered and there is nothing to collide with.
-  //
-  // This holds only because Daraja calls are bounded by DARAJA_TIMEOUT_MS,
-  // which is well under PUSH_COOLDOWN_MS: an in-flight push has aborted long
-  // before its attempt becomes eligible for release. Without that bound a push
-  // could still be running here, later succeed, and add a second prompt.
   if (!attempt.checkoutRequestId) {
+    // A push went out but its id was never recorded — the process died, or the
+    // write failed, after Safaricom had already accepted it. A prompt may be
+    // live and there is no id to ask about, so this can never be released
+    // automatically. Held pending until reconciliation or a human resolves it;
+    // charging the guest twice is the worse outcome.
+    if (attempt.pushDispatchedAt) {
+      log.error(
+        { paymentId: attempt.id },
+        "Attempt has a dispatched push with no checkout id; holding it pending",
+      );
+      return "still_live";
+    }
+
+    // No push was ever dispatched, so no prompt exists.
     await db.update(payments)
-      .set({ status: "timeout", resultDesc: "Push never reached Safaricom" })
+      .set({ status: "timeout", resultDesc: "Push was never dispatched" })
       .where(and(eq(payments.id, attempt.id), eq(payments.status, "pending")));
     return "released";
   }
@@ -239,44 +246,75 @@ export const initiate: AppRouteHandler<InitiateRoute> = async (c) => {
     throw err;
   }
 
+  // Record that a push is about to go out, BEFORE sending it. From here on a
+  // prompt may exist, and nothing may release this attempt without proof that
+  // it doesn't. Crashing between this write and the push is the safe
+  // direction: the attempt is held rather than released.
+  await db.update(payments)
+    .set({ pushDispatchedAt: new Date() })
+    .where(eq(payments.id, payment.id));
+
+  let push;
   try {
-    const push = await stkPush({
+    push = await stkPush({
       phoneNumber: payFrom,
       amountCents: booking.totalAmountCents,
       accountReference: booking.id.slice(0, 8),
       description: "Rental booking",
     });
-
-    await db.update(payments)
-      .set({
-        checkoutRequestId: push.checkoutRequestId,
-        merchantRequestId: push.merchantRequestId,
-      })
-      .where(eq(payments.id, payment.id));
-
-    return c.json({
-      paymentId: payment.id,
-      status: "pending" as const,
-      customerMessage: push.customerMessage
-        || "A payment request has been sent to your phone.",
-    }, HttpStatusCodes.ACCEPTED);
   }
   catch (err) {
-    // The attempt happened and failed; keep the row so the trail is complete.
-    await db.update(payments)
-      .set({
-        status: "failed",
-        resultDesc: err instanceof MpesaError ? err.message : "STK push failed",
-      })
-      .where(eq(payments.id, payment.id));
-
     c.var.logger.error({ err, bookingId: booking.id }, "M-Pesa STK push failed");
+
+    // Only settle the attempt when Safaricom actually answered and refused —
+    // then no prompt exists and the row can safely stop holding the guard.
+    // A timeout or network error is NOT proof of that: the request may have
+    // landed and produced a prompt, so the attempt stays pending and keeps
+    // blocking retries.
+    const refusedByDaraja = err instanceof MpesaError && err.status !== undefined;
+
+    if (refusedByDaraja) {
+      await db.update(payments)
+        .set({ status: "failed", resultDesc: (err as MpesaError).message })
+        .where(and(eq(payments.id, payment.id), eq(payments.status, "pending")));
+    }
 
     return c.json(
       { message: "Could not reach M-Pesa. Please try again shortly." },
       HttpStatusCodes.BAD_GATEWAY,
     );
   }
+
+  try {
+    await db.update(payments)
+      .set({
+        checkoutRequestId: push.checkoutRequestId,
+        merchantRequestId: push.merchantRequestId,
+      })
+      .where(eq(payments.id, payment.id));
+  }
+  catch (err) {
+    // The prompt IS live — Safaricom accepted it — but its id could not be
+    // recorded. Deliberately leave the attempt pending: marking it failed here
+    // would release the uniqueness guard and let a retry put a second live
+    // prompt on the guest's handset.
+    c.var.logger.error(
+      { err, paymentId: payment.id, bookingId: booking.id },
+      "STK push accepted but its checkout id could not be stored; attempt held pending",
+    );
+
+    return c.json(
+      { message: "A payment request may have been sent to your phone. Please check before retrying." },
+      HttpStatusCodes.BAD_GATEWAY,
+    );
+  }
+
+  return c.json({
+    paymentId: payment.id,
+    status: "pending" as const,
+    customerMessage: push.customerMessage
+      || "A payment request has been sent to your phone.",
+  }, HttpStatusCodes.ACCEPTED);
 };
 
 export const callback: AppRouteHandler<CallbackRoute> = async (c) => {

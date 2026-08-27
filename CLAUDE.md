@@ -163,6 +163,21 @@ Non-default dev ports are deliberate: another project on this machine binds
   its attempt can be released — otherwise it could succeed afterwards and put a
   second prompt on the guest's handset.
 
+- **`pushDispatchedAt` is set before the push goes out**, and it is what makes
+  a pending attempt with no `checkoutRequestId` unambiguous:
+  - marker absent -> no push was ever dispatched, no prompt exists, safe to
+    release;
+  - marker present -> Safaricom may already have delivered a prompt we cannot
+    identify, so the attempt is **never** released automatically. It holds the
+    uniqueness guard until reconciliation or a human resolves it. Blocking
+    that booking's retries is the lesser evil against charging the guest twice.
+
+  For the same reason, a failed push only settles the attempt when Safaricom
+  *answered and refused* (`MpesaError.status` present). A timeout or network
+  error is not proof that no prompt was delivered, so the attempt stays
+  pending. And a push that succeeded but whose id could not be stored must
+  never be marked failed — that would free a retry to add a second live prompt.
+
 - **Never release a stale attempt on a timer alone.** The STK request has no
   guaranteed lifetime, so assuming a prompt died after N seconds can leave
   two live prompts and charge the guest twice. `releaseStaleAttempt()` asks

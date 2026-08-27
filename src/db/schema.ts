@@ -289,6 +289,18 @@ export const payments = pgTable(
     amountCents: integer("amount_cents").notNull(),
     status: paymentStatusEnum("status").notNull().default("pending"),
 
+    /**
+     * Set immediately BEFORE the STK push is sent, so a prompt that may be
+     * live is always distinguishable from one that never happened.
+     *
+     * Without it, a pending row with no checkoutRequestId is ambiguous: the
+     * push might never have been attempted, or it might have been accepted by
+     * Safaricom while the process crashed before recording the id. Releasing
+     * the second case would let a retry add a second live prompt and charge
+     * the guest twice.
+     */
+    pushDispatchedAt: timestamp("push_dispatched_at", { withTimezone: true }),
+
     // M-Pesa STK push correlation IDs — needed to match async callbacks
     // back to this payment attempt.
     checkoutRequestId: text("checkout_request_id"),

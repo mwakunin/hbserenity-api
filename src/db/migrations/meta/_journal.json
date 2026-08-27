@@ -29,6 +29,13 @@
       "when": 1787847130321,
       "tag": "0003_one_pending_payment_per_booking",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1787850492579,
+      "tag": "0004_payment_push_dispatched_at",
+      "breakpoints": true
     }
   ]
 }
