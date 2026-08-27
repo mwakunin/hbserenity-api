@@ -1,0 +1,1 @@
+ALTER TABLE "payments" ADD COLUMN "push_dispatched_at" timestamp with time zone;

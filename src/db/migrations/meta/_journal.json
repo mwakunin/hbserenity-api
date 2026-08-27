@@ -22,6 +22,27 @@
       "when": 1787821099914,
       "tag": "0002_bedroom_type_consistency",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1787847130321,
+      "tag": "0003_one_pending_payment_per_booking",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1787850492579,
+      "tag": "0004_payment_push_dispatched_at",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1787854263998,
+      "tag": "0005_backfill_push_dispatched_at",
+      "breakpoints": true
     }
   ]
 }

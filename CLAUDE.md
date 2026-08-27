@@ -6,9 +6,9 @@ Guidance for Claude Code when working in this repository.
 
 A short-term rental management platform for Kenya (Airbnb-style). **Single
 host** — you own and manage the properties; guests browse publicly and must
-verify a phone number to book. Payment is intended to be M-Pesa (STK push),
-but **that is not built yet** — see "Not built yet" below. Bookings are
-created in `pending_payment` and stay there.
+verify a phone number to book, then pay by M-Pesa STK push. A booking is
+created in `pending_payment` and becomes `confirmed` only once Safaricom
+confirms the payment — see the callback rules below, which matter.
 
 This repo currently contains **only the API** — Hono + `@hono/zod-openapi`,
 Drizzle ORM, Postgres (local Docker for dev/test, Neon for staging/prod). It is
@@ -109,9 +109,120 @@ Non-default dev ports are deliberate: another project on this machine binds
   `[checkIn, checkOut)` — the checkout day is immediately bookable by the
   next guest, so back-to-back stays are legal and must stay legal.
 - **Payments are append-only per attempt**: a booking can have multiple
-  `payments` rows (retries). Never overwrite a payment row's status —
-  insert a new attempt instead if the guest retries. `checkoutRequestId` is
-  the idempotency key for matching M-Pesa callbacks back to an attempt.
+  `payments` rows (retries). A **retry inserts a new row** — never reuse or
+  overwrite a previous attempt, so a failure is still on the record after a
+  later success. A row's own status does move once, `pending` → terminal,
+  when its outcome arrives. `checkoutRequestId` is the idempotency key
+  matching a callback back to an attempt.
+
+- **The M-Pesa callback is unauthenticated — treat it as a hint, never as
+  proof.** Safaricom does not sign callbacks, so the endpoint:
+  1. optionally checks the source IP (`MPESA_CALLBACK_ALLOWED_IPS`);
+  2. ignores unknown `checkoutRequestId`s and already-settled payments, so a
+     replay cannot re-confirm anything;
+  3. rejects any callback whose amount differs from the booking total;
+  4. **queries Safaricom directly** (`queryStkStatus`) and confirms only if
+     Safaricom agrees. If that query fails, the payment is left `pending`
+     rather than confirmed — fail closed.
+
+  It also **never returns `checkoutRequestId` (or `merchantRequestId`) to the
+  client, from any endpoint**. Those ids are all the callback needs to
+  identify a payment, so handing one over would let a guest start a real push,
+  cancel it, and forge a result for it. The payment-history endpoint selects
+  an explicit column list rather than `select()` for exactly this reason —
+  a bare select would start leaking any correlation id added to the table
+  later. Verify both here and in `publicPaymentSchema` when adding columns.
+
+  Because verification covers failures too, a forged _failure_ cannot settle
+  an attempt either. That matters: settling it would make the genuine success
+  callback look already-handled, stranding a booking the guest has paid for.
+
+  **At most one pending attempt per booking**, enforced by the partial unique
+  index `payments_one_pending_per_booking`. A check-then-insert cannot hold —
+  two concurrent requests both read "none pending" and both push, so the guest
+  gets two prompts and can be charged twice. Stale pending rows are moved to
+  `timeout` before a new insert so an abandoned prompt can't block retries.
+
+  Terminal writes are compare-and-swap, so two callbacks racing for one
+  attempt cannot have the loser overwrite the winner — a failure clobbering a
+  verified success would leave the payment recorded failed while its booking
+  stayed confirmed.
+
+- **`timeout` is not a settled status.** `success` and `failed` are
+  Safaricom's verdicts and must never be reopened. `timeout` is only _our_
+  guess that we stopped waiting, so a late callback saying the guest paid
+  still settles it — otherwise the money is taken and the booking never
+  confirms. `SETTLED_STATUSES` vs `RESOLVABLE_STATUSES` encode this; keep
+  them apart.
+
+- **Every Daraja call is bounded** by `DARAJA_TIMEOUT_MS`. `fetch` has no
+  default timeout, and this is load-bearing rather than hygiene: a push still
+  in flight has not recorded its `checkoutRequestId`, and a pending attempt
+  with no checkout id is treated as "no prompt was delivered". The timeout must
+  stay well under `PUSH_COOLDOWN_MS` so an in-flight push has aborted before
+  its attempt can be released — otherwise it could succeed afterwards and put a
+  second prompt on the guest's handset.
+
+- **`pushDispatchedAt` is set before the push goes out**, and it is what makes
+  a pending attempt with no `checkoutRequestId` unambiguous:
+  - marker absent -> no push was ever dispatched, no prompt exists, safe to
+    release;
+  - marker present -> Safaricom may already have delivered a prompt we cannot
+    identify, so the attempt is **never** released automatically. It holds the
+    uniqueness guard until reconciliation or a human resolves it. Blocking
+    that booking's retries is the lesser evil against charging the guest twice.
+
+  For the same reason, a failed push only settles the attempt when Safaricom
+  _answered and refused_ (`MpesaError.status` present). A timeout or network
+  error is not proof that no prompt was delivered, so the attempt stays
+  pending. And a push that succeeded but whose id could not be stored must
+  never be marked failed — that would free a retry to add a second live prompt.
+
+- **One rule decides whether an attempt may stop holding its booking**, and it
+  lives in `verdictFor()` in `lib/mpesa.ts`. `paid` / `dead` / `indeterminate`
+  — and only `dead` (or `paid`) may release. This was previously answered
+  separately in the push-error path, the callback path and the stale-attempt
+  path, which is how 1001 ("transaction in process") ended up terminal in one
+  and still-live in another. **Do not re-derive this decision locally**; every
+  new branch that settles an attempt must route through it.
+
+  The same rule applies to a failed push: `MpesaError.definitive` is true only
+  when Safaricom _answered and refused_ (HTTP < 500). A 5xx, a timeout or a
+  network error is not proof that no prompt exists.
+
+  And because a _succeeded_ attempt no longer holds the pending-only unique
+  index, the booking status is re-read **under a row lock** immediately before
+  inserting a new attempt. The check at the top of `initiate` is stale by then:
+  `releaseStaleAttempt` makes network calls, and a callback can confirm the
+  booking inside that window.
+
+- **Sending a prompt is an external side effect, so one window is
+  irreducible.** The booking is checked and the attempt inserted (with
+  `pushDispatchedAt`) in a single locked transaction, but the push itself
+  happens after that commit. A late callback for an earlier attempt can
+  confirm the booking in between. Closing that would mean holding a row lock
+  across a network call, which stalls the callback and risks exhausting the
+  connection pool — so the outcome is made _visible_ instead: after a
+  successful push the booking is re-read, and a prompt sent against an
+  already-settled booking is flagged on the payment for refund review. Keep
+  that flag; it is the only trace of a genuine duplicate charge.
+
+- **Never release a stale attempt on a timer alone.** The STK request has no
+  guaranteed lifetime, so assuming a prompt died after N seconds can leave
+  two live prompts and charge the guest twice. `releaseStaleAttempt()` asks
+  Safaricom and releases only on a result code in `DEAD_RESULT_CODES` — an
+  allowlist, because "not a code I recognise" (including 1001, transaction in
+  process) and any query error both mean _possibly still live_, and it fails
+  closed. If the stale attempt turns out to have succeeded, it is settled and
+  the booking confirmed rather than the guest being charged again.
+
+  The endpoint always answers `200 {ResultCode: 0, ResultDesc: "Accepted"}`.
+  Any other status makes Safaricom retry indefinitely — which is why the route
+  carries its own validation hook in `payments.index.ts`. The schema tolerates
+  junk inside the envelope, but a body that isn't an object at all (a bare
+  array, a scalar, `null`) fails validation, and the default hook would answer
+  422 and start an endless retry loop.
+
 - **Booking price snapshot**: `bookings.totalAmountCents` is fixed at
   creation time and must never be recalculated from the property's current
   price later.
@@ -272,11 +383,15 @@ Don't weaken them.
 
 Deliberately deferred — don't assume these exist:
 
-- **M-Pesa STK push and the callback handler.** The `payments` table and env
-  vars are in place; no code calls Safaricom yet. When building it: the
-  callback is public and unsigned, so treat it as untrusted, allowlist
-  Safaricom IPs, and re-query transaction status rather than believing the
-  payload.
+- **Payment reconciliation.** If Safaricom is unreachable when a callback
+  arrives, the payment is deliberately left `pending` rather than confirmed.
+  Nothing sweeps those up yet — a job that re-runs `queryStkStatus` over
+  stale pending payments is the missing piece, and until it exists such a
+  booking needs settling by hand.
+- **Refunds.** A payment can succeed against a booking the guest cancelled
+  while the push was in flight. That is recorded truthfully (payment
+  `success`, booking `cancelled`) and left for a human — there is no reversal
+  API call.
 - **Redis rate limiting** (`rate-limiter-flexible`) — Redis runs in compose
   but nothing uses it yet. Tightest limits belong on the STK-push endpoint.
 - **Resend email** and **ImageKit uploads** — env vars only.
@@ -286,7 +401,8 @@ Deliberately deferred — don't assume these exist:
 - **Seasonal / weekend pricing** — one flat `pricePerNightCents` today. Diani
   high season and Nairobi weekday-business rates differ sharply, so a
   `property_rate_overrides` table is likely the next schema change.
-- **Partial deposits** (50%-now-balance-later is common locally),
+- **Partial deposits** (50%-now-balance-later is common locally) — a payment
+  is currently all-or-nothing against `bookings.totalAmountCents`,
   **cancellation metadata** (no `cancelledAt`/reason/refund trail), and a
   **booking idempotency key** so a double-tapped "Book now" can't create two
   bookings.

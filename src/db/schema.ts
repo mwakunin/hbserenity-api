@@ -289,6 +289,18 @@ export const payments = pgTable(
     amountCents: integer("amount_cents").notNull(),
     status: paymentStatusEnum("status").notNull().default("pending"),
 
+    /**
+     * Set immediately BEFORE the STK push is sent, so a prompt that may be
+     * live is always distinguishable from one that never happened.
+     *
+     * Without it, a pending row with no checkoutRequestId is ambiguous: the
+     * push might never have been attempted, or it might have been accepted by
+     * Safaricom while the process crashed before recording the id. Releasing
+     * the second case would let a retry add a second live prompt and charge
+     * the guest twice.
+     */
+    pushDispatchedAt: timestamp("push_dispatched_at", { withTimezone: true }),
+
     // M-Pesa STK push correlation IDs — needed to match async callbacks
     // back to this payment attempt.
     checkoutRequestId: text("checkout_request_id"),
@@ -304,6 +316,17 @@ export const payments = pgTable(
     index("payments_booking_idx").on(table.bookingId),
     uniqueIndex("payments_checkout_request_idx").on(table.checkoutRequestId),
     wholeShillings("payments_amount_whole", table.amountCents),
+    // At most one in-flight attempt per booking. A check-then-insert in the
+    // handler cannot guarantee this — two concurrent requests both read "none
+    // pending" and both push, putting two PIN prompts on the guest's handset
+    // and letting them be charged twice. A partial unique index makes the
+    // second insert fail outright.
+    //
+    // Stale attempts are moved to `timeout` before a new insert, so an
+    // abandoned prompt can't block retries forever.
+    uniqueIndex("payments_one_pending_per_booking")
+      .on(table.bookingId)
+      .where(sql`${table.status} = 'pending'`),
   ],
 );
 

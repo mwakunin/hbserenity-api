@@ -43,11 +43,20 @@ const EnvSchema = z.object({
   BETTER_AUTH_URL: z.url(),
 
   // --- M-Pesa ---
+  // Picks the Daraja host: sandbox.safaricom.co.ke vs api.safaricom.co.ke.
+  MPESA_ENV: z.enum(["sandbox", "production"]).default("sandbox"),
   MPESA_CONSUMER_KEY: z.string().optional(),
   MPESA_CONSUMER_SECRET: z.string().optional(),
   MPESA_SHORTCODE: z.string().optional(),
   MPESA_PASSKEY: z.string().optional(),
   MPESA_CALLBACK_URL: z.url().optional(),
+  /**
+   * Comma-separated Safaricom source IPs permitted to POST the callback.
+   * Safaricom does not sign callbacks, so this is one of the few things that
+   * distinguishes a real one. Optional because the published list changes;
+   * when empty the endpoint relies on its other checks instead.
+   */
+  MPESA_CALLBACK_ALLOWED_IPS: z.string().optional(),
 
   // --- Email (Resend) ---
   RESEND_API_KEY: z.string().optional(),

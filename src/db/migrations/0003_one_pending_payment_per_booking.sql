@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "payments_one_pending_per_booking" ON "payments" USING btree ("booking_id") WHERE "payments"."status" = 'pending';
