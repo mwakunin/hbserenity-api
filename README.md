@@ -5,7 +5,7 @@ guests.
 
 > **Status:** booking and M-Pesa payment are complete and tested against a
 > mocked Safaricom. Add your Daraja credentials to `.env` to run it for real.
-> Not yet built: payment reconciliation, refunds, email, and photo uploads —
+> Not yet built: refunds, email, and photo uploads —
 > see [CLAUDE.md](./CLAUDE.md) for the full list.
 
 Built on [Hono](https://hono.dev/) with `@hono/zod-openapi`, Drizzle ORM
@@ -75,6 +75,8 @@ The API is at http://localhost:9999 — API reference at
 | `POST /bookings/{id}/pay`              | guest  | Trigger an M-Pesa STK push                  |
 | `GET /bookings/{id}/payments`          | guest  | Every payment attempt, newest first         |
 | `POST /mpesa/callback`                 | —      | Safaricom result callback (verified)        |
+| `POST /admin/payments/reconcile`       | admin  | Settle payments whose outcome was lost      |
+| `GET /admin/payments/attention`        | admin  | Payments needing a human                    |
 
 ## Design notes
 

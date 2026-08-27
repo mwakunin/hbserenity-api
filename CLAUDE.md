@@ -196,6 +196,22 @@ Non-default dev ports are deliberate: another project on this machine binds
   `releaseStaleAttempt` makes network calls, and a callback can confirm the
   booking inside that window.
 
+- **Everything that settles a payment goes through
+  `lib/payment-settlement.ts`.** The retry path, the callback and
+  reconciliation all need identical rules, and when they each had their own
+  copy they drifted — 1001 ("transaction in process") ended up terminal in one
+  and still-live in another. `settleAttemptFromProvider()` is the only place
+  that asks Safaricom and applies the verdict. Do not reimplement it.
+
+- **Reconciliation is what makes failing closed safe.** The payment flow
+  deliberately leaves an attempt pending whenever it cannot prove what
+  happened. `lib/reconciliation.ts` is what eventually resolves those:
+  `POST /admin/payments/reconcile` sweeps and settles, and
+  `GET /admin/payments/attention` lists what it cannot fix — a push dispatched
+  with no reference, a possible duplicate charge, money against a cancelled
+  booking, an attempt stuck pending. Both are admin-only and the sweep is
+  idempotent, so running it twice at once settles nothing twice.
+
 - **Sending a prompt is an external side effect, so one window is
   irreducible.** The booking is checked and the attempt inserted (with
   `pushDispatchedAt`) in a single locked transaction, but the push itself
@@ -383,15 +399,14 @@ Don't weaken them.
 
 Deliberately deferred — don't assume these exist:
 
-- **Payment reconciliation.** If Safaricom is unreachable when a callback
-  arrives, the payment is deliberately left `pending` rather than confirmed.
-  Nothing sweeps those up yet — a job that re-runs `queryStkStatus` over
-  stale pending payments is the missing piece, and until it exists such a
-  booking needs settling by hand.
 - **Refunds.** A payment can succeed against a booking the guest cancelled
   while the push was in flight. That is recorded truthfully (payment
-  `success`, booking `cancelled`) and left for a human — there is no reversal
-  API call.
+  `success`, booking `cancelled`) and surfaced by
+  `GET /admin/payments/attention`, but there is no reversal API call — a
+  human still has to send the money back.
+- **Scheduling for reconciliation.** The sweep exists and is idempotent, but
+  nothing calls it on a timer. Point an external cron at
+  `POST /admin/payments/reconcile` (every few minutes) before going live.
 - **Redis rate limiting** (`rate-limiter-flexible`) — Redis runs in compose
   but nothing uses it yet. Tightest limits belong on the STK-push endpoint.
 - **Resend email** and **ImageKit uploads** — env vars only.
