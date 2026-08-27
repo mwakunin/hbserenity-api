@@ -1,0 +1,55 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: rentals-postgres-dev
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: rentals
+      POSTGRES_PASSWORD: rentals
+      POSTGRES_DB: rentals_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_dev_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rentals -d rentals_dev"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  postgres-test:
+    image: postgres:16-alpine
+    container_name: rentals-postgres-test
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: rentals
+      POSTGRES_PASSWORD: rentals
+      POSTGRES_DB: rentals_test
+    ports:
+      - "5433:5432"
+    # No named volume — test DB is disposable and gets wiped/reset between runs.
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rentals -d rentals_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: rentals-redis-dev
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_dev_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_dev_data:
+  redis_dev_data:
