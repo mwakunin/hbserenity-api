@@ -6,6 +6,7 @@ import type { AppRouteHandler } from "@/lib/types";
 
 import db from "@/db";
 import { bookings, properties, propertyBlackouts } from "@/db/schema";
+import { isExclusionViolation } from "@/lib/db-errors";
 import { calculateBookingTotal } from "@/lib/pricing";
 
 import type {
@@ -20,32 +21,10 @@ import type {
 /** Booking statuses that actually hold dates against other guests. */
 const HOLDING_STATUSES = ["pending_payment", "confirmed"] as const;
 
-/** SQLSTATE for exclusion_violation. */
-const EXCLUSION_VIOLATION = "23P01";
-
-/**
- * Postgres raises 23P01 when an EXCLUDE constraint is violated — that's the
- * bookings_no_overlap guard firing. It is the real concurrency defence: two
- * simultaneous requests can both pass an application-level availability
- * check, but only one can win this.
- *
- * Drizzle wraps driver errors in a DrizzleQueryError and hangs the original
- * pg error off `.cause`, so the code is never on the top-level object —
- * walk the chain rather than checking one level.
- */
-function isExclusionViolation(err: unknown): boolean {
-  let current = err;
-
-  for (let depth = 0; current != null && depth < 5; depth += 1) {
-    if (typeof current === "object" && "code" in current
-      && (current as { code?: unknown }).code === EXCLUSION_VIOLATION) {
-      return true;
-    }
-    current = (current as { cause?: unknown }).cause;
-  }
-
-  return false;
-}
+// Postgres raises 23P01 when an EXCLUDE constraint is violated — that's the
+// bookings_no_overlap guard firing. It is the real concurrency defence: two
+// simultaneous requests can both pass an application-level availability
+// check, but only one can win this.
 
 export const availability: AppRouteHandler<AvailabilityRoute> = async (c) => {
   const { id } = c.req.valid("param");

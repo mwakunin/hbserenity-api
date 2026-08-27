@@ -7,6 +7,7 @@ import type { AppRouteHandler } from "@/lib/types";
 import db from "@/db";
 import { bookings, properties } from "@/db/schema";
 import { ZOD_ERROR_CODES, ZOD_ERROR_MESSAGES } from "@/lib/constants";
+import { isCheckViolation, pgConstraintName } from "@/lib/db-errors";
 
 import type {
   CreateRoute,
@@ -15,6 +16,50 @@ import type {
   PatchRoute,
   RemoveRoute,
 } from "./properties.routes";
+
+/**
+ * A PATCH can't be validated across fields by Zod — it only carries the
+ * changed keys, not the resulting row — so the database CHECK constraints are
+ * the backstop. Translate them into the same 422 shape Zod produces rather
+ * than letting a constraint violation surface as a 500.
+ */
+const CHECK_MESSAGES: Record<string, { path: string[]; message: string }> = {
+  properties_bedrooms_match_type: {
+    path: ["bedrooms"],
+    message:
+      "A studio must have 0 bedrooms; every other property type must have at "
+      + "least 1. Count enclosed sleeping rooms, not beds.",
+  },
+  properties_capacity_positive: {
+    path: ["beds"],
+    message: "A property must sleep at least one guest and have at least one bed.",
+  },
+  properties_price_per_night_whole: {
+    path: ["pricePerNightCents"],
+    message: "Amount must be a whole number of shillings (divisible by 100)",
+  },
+  properties_cleaning_fee_whole: {
+    path: ["cleaningFeeCents"],
+    message: "Amount must be a whole number of shillings (divisible by 100)",
+  },
+};
+
+function checkViolationBody(err: unknown) {
+  const constraint = pgConstraintName(err);
+  const known = constraint ? CHECK_MESSAGES[constraint] : undefined;
+
+  return {
+    success: false as const,
+    error: {
+      issues: [{
+        code: "custom",
+        path: known?.path ?? [],
+        message: known?.message ?? "That combination of values isn't allowed",
+      }],
+      name: "ZodError",
+    },
+  };
+}
 
 export const list: AppRouteHandler<ListRoute> = async (c) => {
   const { county, town, propertyType, minGuests, maxPriceCents, page, limit }
@@ -85,13 +130,20 @@ export const getOne: AppRouteHandler<GetOneRoute> = async (c) => {
 export const create: AppRouteHandler<CreateRoute> = async (c) => {
   const input = c.req.valid("json");
 
-  const [created] = await db.insert(properties).values({
-    ...input,
-    // Single-host model: the authenticated admin owns what they create.
-    hostId: c.var.user!.id,
-  }).returning();
+  try {
+    const [created] = await db.insert(properties).values({
+      ...input,
+      // Single-host model: the authenticated admin owns what they create.
+      hostId: c.var.user!.id,
+    }).returning();
 
-  return c.json(created, HttpStatusCodes.CREATED);
+    return c.json(created, HttpStatusCodes.CREATED);
+  }
+  catch (err) {
+    if (isCheckViolation(err))
+      return c.json(checkViolationBody(err), HttpStatusCodes.UNPROCESSABLE_ENTITY);
+    throw err;
+  }
 };
 
 export const patch: AppRouteHandler<PatchRoute> = async (c) => {
@@ -115,10 +167,18 @@ export const patch: AppRouteHandler<PatchRoute> = async (c) => {
     );
   }
 
-  const [updated] = await db.update(properties)
-    .set(updates)
-    .where(eq(properties.id, id))
-    .returning();
+  let updated;
+  try {
+    [updated] = await db.update(properties)
+      .set(updates)
+      .where(eq(properties.id, id))
+      .returning();
+  }
+  catch (err) {
+    if (isCheckViolation(err))
+      return c.json(checkViolationBody(err), HttpStatusCodes.UNPROCESSABLE_ENTITY);
+    throw err;
+  }
 
   if (!updated) {
     return c.json(

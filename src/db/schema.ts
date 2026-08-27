@@ -133,9 +133,20 @@ export const properties = pgTable(
     index("properties_status_idx").on(table.status),
     wholeShillings("properties_price_per_night_whole", table.pricePerNightCents),
     wholeShillings("properties_cleaning_fee_whole", table.cleaningFeeCents),
+    // `bedrooms` counts separate enclosed sleeping rooms, so 0 is legitimate
+    // (a studio or bedsitter). `bathrooms` may be 0 where ablutions are
+    // shared. `beds` is places to sleep and is never 0 — a listing with
+    // maxGuests > 0 and nowhere to sleep is not bookable.
     check(
       "properties_capacity_positive",
-      sql`${table.maxGuests} > 0 AND ${table.bedrooms} >= 0 AND ${table.bathrooms} >= 0 AND ${table.beds} >= 0`,
+      sql`${table.maxGuests} > 0 AND ${table.bedrooms} >= 0 AND ${table.bathrooms} >= 0 AND ${table.beds} >= 1`,
+    ),
+    // Keeps propertyType and bedrooms from contradicting each other: a studio
+    // is by definition one open room, anything else has at least one bedroom.
+    check(
+      "properties_bedrooms_match_type",
+      sql`(${table.propertyType} = 'studio' AND ${table.bedrooms} = 0)
+        OR (${table.propertyType} <> 'studio' AND ${table.bedrooms} >= 1)`,
     ),
     check(
       "properties_latitude_range",

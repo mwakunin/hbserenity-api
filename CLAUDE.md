@@ -74,6 +74,27 @@ Non-default dev ports are deliberate: another project on this machine binds
 - **Phone numbers**: E.164 format (`+2547XXXXXXXX`) everywhere — this is the
   join key for M-Pesa STK push, so normalize on input rather than at
   payment time.
+
+- **Capacity fields mean specific things** — don't conflate them:
+  - `bedrooms` = separate **enclosed sleeping rooms**. Legitimately `0`.
+  - `beds` = **places to sleep**. Never `0` (`CHECK beds >= 1`); a listing
+    that sleeps nobody isn't bookable.
+  - `bathrooms` = may be `0` where ablutions are shared.
+  - `maxGuests` = the booking cap, enforced against `bookings.guestCount`.
+
+  A **studio or bedsitter** is `propertyType: "studio"` with `bedrooms: 0`.
+  There is deliberately no separate `bedsitter` type — the two differ by
+  fit-out and price tier, not structure, and "studio" is the term guests
+  search on. `properties_bedrooms_match_type` keeps the two columns from
+  contradicting each other: a `studio` must have `bedrooms = 0`, and every
+  other type must have `bedrooms >= 1`.
+
+  A PATCH can't be checked across fields by Zod — the body carries only the
+  changed keys, not the resulting row — so the DB CHECK is the backstop and
+  `properties.handlers.ts` maps SQLSTATE `23514` onto the same 422 shape Zod
+  produces. Add a `CHECK_MESSAGES` entry whenever you add a CHECK
+  constraint, or the caller gets a generic message.
+
 - **Booking status lifecycle**: `pending_payment → confirmed → completed`,
   or `→ cancelled` from `pending_payment`. Don't add new statuses without
   updating every place that switches on `booking.status` — including the
@@ -121,7 +142,7 @@ Non-default dev ports are deliberate: another project on this machine binds
   never hand-write migration SQL unless patching something drizzle-kit can't
   express (e.g. the exclusion constraint above).
 - Local dev and test run against Docker Postgres (started via `./dev.sh`), not
-  Neon — dev on `rentals_dev` (:5432), test on `rentals_test` (:5433, tmpfs,
+  Neon — dev on `rentals_dev` (:5434), test on `rentals_test` (:5433, tmpfs,
   disposable). Neon is only used for staging/prod; confirm `DATABASE_URL`
   before running migrations if it's ever pointed at a Neon branch.
 - **Identity model resolved**: Better Auth owns `user`, `session`, `account`,

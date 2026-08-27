@@ -128,6 +128,116 @@ describe("properties routes", () => {
     });
   });
 
+  describe("bedrooms vs property type", () => {
+    // `bedrooms` counts enclosed sleeping rooms, so a studio/bedsitter is 0.
+    it("accepts a studio with 0 bedrooms", async () => {
+      const admin = await signIn(nextPhone(), "admin");
+      const res = await post(
+        validPropertyBody({
+          propertyType: "studio",
+          bedrooms: 0,
+          beds: 1,
+          maxGuests: 2,
+        }),
+        admin.headers,
+      );
+      expect(res.status).toBe(201);
+      expect((await res.json()).bedrooms).toBe(0);
+    });
+
+    it("rejects a studio claiming bedrooms", async () => {
+      const admin = await signIn(nextPhone(), "admin");
+      const res = await post(
+        validPropertyBody({ propertyType: "studio", bedrooms: 2 }),
+        admin.headers,
+      );
+
+      expect(res.status).toBe(422);
+      expect(JSON.stringify(await res.json())).toMatch(/studio must have 0 bedrooms/i);
+    });
+
+    it.each(["apartment", "house", "villa", "cottage", "guesthouse"] as const)(
+      "rejects a %s with 0 bedrooms",
+      async (propertyType) => {
+        const admin = await signIn(nextPhone(), "admin");
+        const res = await post(
+          validPropertyBody({ propertyType, bedrooms: 0 }),
+          admin.headers,
+        );
+        expect(res.status).toBe(422);
+      },
+    );
+
+    it("rejects a property with zero beds — it would sleep nobody", async () => {
+      const admin = await signIn(nextPhone(), "admin");
+      const res = await post(validPropertyBody({ beds: 0 }), admin.headers);
+      expect(res.status).toBe(422);
+    });
+
+    it("accepts a bedsitter as a studio: 0 bedrooms, 1 bed, shared-ok bathroom", async () => {
+      const admin = await signIn(nextPhone(), "admin");
+      const res = await post(
+        validPropertyBody({
+          title: "Kilimani Bedsitter",
+          propertyType: "studio",
+          bedrooms: 0,
+          bathrooms: 0,
+          beds: 1,
+          maxGuests: 1,
+        }),
+        admin.headers,
+      );
+      expect(res.status).toBe(201);
+    });
+
+    it("422s a PATCH that would break the rule — the DB CHECK is the backstop", async () => {
+      const admin = await signIn(nextPhone(), "admin");
+      const created = await post(
+        validPropertyBody({
+          propertyType: "studio",
+          bedrooms: 0,
+          beds: 1,
+          maxGuests: 2,
+        }),
+        admin.headers,
+      );
+      const { id } = await created.json();
+
+      // Zod can't catch this: the patch body alone looks perfectly valid.
+      const res = await app.request(`/properties/${id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json", ...admin.headers },
+        body: JSON.stringify({ bedrooms: 3 }),
+      });
+
+      expect(res.status).toBe(422);
+      expect(JSON.stringify(await res.json())).toMatch(/studio must have 0 bedrooms/i);
+    });
+
+    it("allows a PATCH that changes type and bedrooms together", async () => {
+      const admin = await signIn(nextPhone(), "admin");
+      const created = await post(
+        validPropertyBody({
+          propertyType: "studio",
+          bedrooms: 0,
+          beds: 1,
+          maxGuests: 2,
+        }),
+        admin.headers,
+      );
+      const { id } = await created.json();
+
+      const res = await app.request(`/properties/${id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json", ...admin.headers },
+        body: JSON.stringify({ propertyType: "apartment", bedrooms: 1 }),
+      });
+
+      expect(res.status).toBe(200);
+      expect((await res.json()).propertyType).toBe("apartment");
+    });
+  });
+
   describe("public listing", () => {
     it("is reachable without authentication", async () => {
       const res = await app.request("/properties");

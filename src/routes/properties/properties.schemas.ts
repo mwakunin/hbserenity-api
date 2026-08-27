@@ -24,31 +24,53 @@ const rawSelectPropertyImage = createSelectSchema(propertyImages);
 
 export const selectPropertySchema = toZodV4SchemaTyped(rawSelectProperty);
 
+/**
+ * `bedrooms` counts separate enclosed sleeping rooms, so 0 is valid — a studio
+ * or bedsitter. `bathrooms` may be 0 where ablutions are shared. `beds` is
+ * places to sleep and is never 0: a listing that sleeps nobody isn't bookable.
+ *
+ * Kept unwrapped so both the refined insert schema and the partial patch
+ * schema can be derived from it — `.refine()` returns a type that no longer
+ * offers `.partial()`.
+ */
+const rawInsertProperty = createInsertSchema(properties, {
+  title: field => field.min(3).max(200),
+  description: field => field.min(10).max(5000),
+  county: field => field.min(1).max(100),
+  town: field => field.min(1).max(100),
+  maxGuests: field => field.int().positive().max(100),
+  bedrooms: field => field.int().nonnegative().max(50),
+  bathrooms: field => field.int().nonnegative().max(50),
+  beds: field => field.int().min(1).max(100),
+  latitude: field => field.min(-90).max(90),
+  longitude: field => field.min(-180).max(180),
+  pricePerNightCents: wholeShillings,
+  cleaningFeeCents: wholeShillings,
+}).omit({
+  id: true,
+  // Derived from the session, never from the client.
+  hostId: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
 export const insertPropertySchema = toZodV4SchemaTyped(
-  createInsertSchema(properties, {
-    title: field => field.min(3).max(200),
-    description: field => field.min(10).max(5000),
-    county: field => field.min(1).max(100),
-    town: field => field.min(1).max(100),
-    maxGuests: field => field.int().positive().max(100),
-    bedrooms: field => field.int().nonnegative().max(50),
-    bathrooms: field => field.int().nonnegative().max(50),
-    beds: field => field.int().nonnegative().max(100),
-    latitude: field => field.min(-90).max(90),
-    longitude: field => field.min(-180).max(180),
-    pricePerNightCents: wholeShillings,
-    cleaningFeeCents: wholeShillings,
-  }).omit({
-    id: true,
-    // Derived from the session, never from the client.
-    hostId: true,
-    createdAt: true,
-    updatedAt: true,
-  }),
+  // Mirrors the properties_bedrooms_match_type CHECK so the mismatch is a
+  // readable 422 rather than a constraint violation surfacing as a 500.
+  rawInsertProperty.refine(
+    p => (p.propertyType === "studio" ? p.bedrooms === 0 : p.bedrooms >= 1),
+    {
+      path: ["bedrooms"],
+      message:
+        "A studio must have 0 bedrooms; every other property type must have "
+        + "at least 1. Count enclosed sleeping rooms, not beds.",
+    },
+  ),
 );
 
-// @ts-expect-error partial exists on the zod v4 type
-export const patchPropertySchema = insertPropertySchema.partial();
+// Partial: a patch can't be checked across fields without the existing row,
+// so the DB CHECK is the backstop and the handler maps it to a 422.
+export const patchPropertySchema = toZodV4SchemaTyped(rawInsertProperty.partial());
 
 export const selectPropertyImageSchema = toZodV4SchemaTyped(rawSelectPropertyImage);
 
