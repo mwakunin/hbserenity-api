@@ -228,10 +228,17 @@ export async function stkPush(input: {
 
   // Daraja signals failure both by HTTP status and by a non-zero ResponseCode.
   if (!res.ok || String(body.ResponseCode ?? "") !== "0") {
-    // A 5xx means Safaricom broke, not that it refused — the push may still
-    // have been processed and a prompt delivered. Only a business-level
-    // rejection or a 4xx proves no prompt exists.
-    const definitive = res.status < 500;
+    // Only two things prove no prompt exists: a 4xx (the request was never
+    // accepted) or a 2xx carrying an explicit non-zero ResponseCode (Safaricom
+    // answered and refused).
+    //
+    // A 5xx means Safaricom broke, not that it refused. And a 2xx with NO
+    // ResponseCode at all is a malformed or truncated answer, not a rejection —
+    // the push may well have been processed. Both stay indeterminate, so the
+    // attempt keeps holding its booking.
+    const hasBusinessCode = body.ResponseCode !== undefined && body.ResponseCode !== null;
+    const definitive = (res.status >= 400 && res.status < 500)
+      || (res.ok && hasBusinessCode);
 
     throw new MpesaError(
       typeof body.errorMessage === "string"

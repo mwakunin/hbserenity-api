@@ -250,6 +250,17 @@ describe("payments routes", () => {
       expect(row.status).toBe("pending");
     });
 
+    // A 200 with no ResponseCode is a malformed answer, not a refusal — the
+    // push may have been processed, so the attempt must keep holding.
+    it("keeps the attempt pending on a 200 with no ResponseCode", async () => {
+      mockFetch(jsonResponse(TOKEN), jsonResponse({ CustomerMessage: "hmm" }));
+      const res = await pay(guest);
+      expect(res.status).toBe(502);
+
+      const [row] = await db.select().from(payments).where(eq(payments.bookingId, bookingId));
+      expect(row.status).toBe("pending");
+    });
+
     it("settles the attempt on a 4xx, which is a real refusal", async () => {
       mockFetch(jsonResponse(TOKEN), jsonResponse({ errorMessage: "Bad Request" }, 400));
       await pay(guest);
@@ -639,6 +650,27 @@ describe("payments routes", () => {
       expect(res.status).toBe(409);
     });
 
+    it("releases a stale attempt Safaricom reports as terminally failed", async () => {
+      mockFetch(jsonResponse(TOKEN), jsonResponse(PUSH_OK));
+      await pay(guest);
+      await backdate();
+      vi.unstubAllGlobals();
+      resetTokenCache();
+
+      // 1032 = cancelled by user. Terminal, so the old prompt is gone.
+      mockFetch(
+        jsonResponse(TOKEN),
+        jsonResponse({ ResultCode: "1032", ResultDesc: "Request cancelled by user" }),
+        jsonResponse({ ...PUSH_OK, CheckoutRequestID: "ws_CO_test_2" }),
+      );
+      const res = await pay(guest);
+
+      expect(res.status).toBe(202);
+      const rows = await db.select().from(payments).where(eq(payments.bookingId, bookingId));
+      expect(rows).toHaveLength(2);
+      expect(rows.map(r => r.status).sort()).toEqual(["failed", "pending"]);
+    });
+
     it("refuses the retry when Safaricom cannot be reached", async () => {
       mockFetch(jsonResponse(TOKEN), jsonResponse(PUSH_OK));
       await pay(guest);
@@ -732,6 +764,28 @@ describe("payments routes", () => {
 
       const [row] = await db.select().from(payments).where(eq(payments.bookingId, bookingId));
       expect(row.resultDesc).toMatch(/possible duplicate charge/i);
+    });
+
+    it("does not overwrite a description Safaricom already provided", async () => {
+      // The attempt settles while the push is going out; our refund note must
+      // not replace the provider's own record of what happened.
+      vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (url) => {
+        if (String(url).includes("/oauth/")) {
+          await db.update(bookings)
+            .set({ status: "confirmed" })
+            .where(eq(bookings.id, bookingId));
+          await db.update(payments)
+            .set({ status: "failed", resultDesc: "Request cancelled by user" })
+            .where(eq(payments.bookingId, bookingId));
+          return jsonResponse(TOKEN);
+        }
+        return jsonResponse(PUSH_OK);
+      }));
+
+      await pay(guest);
+
+      const [row] = await db.select().from(payments).where(eq(payments.bookingId, bookingId));
+      expect(row.resultDesc).toBe("Request cancelled by user");
     });
 
     it("says nothing when the booking is still awaiting payment", async () => {

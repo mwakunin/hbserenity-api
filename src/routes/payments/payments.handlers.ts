@@ -337,7 +337,10 @@ export const initiate: AppRouteHandler<InitiateRoute> = async (c) => {
       .set({
         resultDesc: `Prompt sent after the booking became '${stillPayable.status}' — possible duplicate charge, needs refund review`,
       })
-      .where(eq(payments.id, payment.id));
+      // Only while still pending: a callback may already have settled this
+      // attempt, and overwriting Safaricom's own description with our note
+      // would destroy the provider's record of what actually happened.
+      .where(and(eq(payments.id, payment.id), eq(payments.status, "pending")));
 
     c.var.logger.error(
       {

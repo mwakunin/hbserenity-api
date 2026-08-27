@@ -202,7 +202,7 @@ Non-default dev ports are deliberate: another project on this machine binds
   happens after that commit. A late callback for an earlier attempt can
   confirm the booking in between. Closing that would mean holding a row lock
   across a network call, which stalls the callback and risks exhausting the
-  connection pool — so the outcome is made *visible* instead: after a
+  connection pool — so the outcome is made _visible_ instead: after a
   successful push the booking is re-read, and a prompt sent against an
   already-settled booking is flagged on the payment for refund review. Keep
   that flag; it is the only trace of a genuine duplicate charge.
