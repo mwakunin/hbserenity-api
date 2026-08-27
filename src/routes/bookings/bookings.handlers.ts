@@ -75,9 +75,22 @@ export const create: AppRouteHandler<CreateRoute> = async (c) => {
 
   try {
     const result = await db.transaction(async (tx) => {
+      // FOR UPDATE locks this property's row for the transaction.
+      //
+      // booking-vs-booking is already guaranteed by the EXCLUDE constraint,
+      // which needs no lock. But booking-vs-blackout spans two tables, where
+      // no constraint can reach: without this lock a booking and an
+      // overlapping blackout could each pass their own check concurrently and
+      // both commit. The lock serializes bookings and blackouts for one
+      // property, which is what makes the blackout check below trustworthy.
+      //
+      // Cost: concurrent bookings for the SAME property queue behind each
+      // other. Different properties are unaffected, and correctness is worth
+      // far more than parallelism here.
       const [property] = await tx.select()
         .from(properties)
-        .where(eq(properties.id, propertyId));
+        .where(eq(properties.id, propertyId))
+        .for("update");
 
       if (!property || property.status !== "active")
         return { kind: "not_found" as const };
@@ -241,23 +254,55 @@ export const cancel: AppRouteHandler<CancelRoute> = async (c) => {
 export const createBlackout: AppRouteHandler<CreateBlackoutRoute> = async (c) => {
   const { propertyId, startDate, endDate, reason } = c.req.valid("json");
 
-  const [property] = await db.select({ id: properties.id })
-    .from(properties)
-    .where(eq(properties.id, propertyId));
-
-  if (!property) {
-    return c.json(
-      { message: HttpStatusPhrases.NOT_FOUND },
-      HttpStatusCodes.NOT_FOUND,
-    );
-  }
-
   try {
-    const [created] = await db.insert(propertyBlackouts)
-      .values({ propertyId, startDate, endDate, reason })
-      .returning();
+    const result = await db.transaction(async (tx) => {
+      // Same property-row lock as booking creation (see the note there).
+      // Without it an admin could black out dates a guest is booking at the
+      // same moment and both would commit: a sold stay marked host-blocked.
+      const [property] = await tx.select({ id: properties.id })
+        .from(properties)
+        .where(eq(properties.id, propertyId))
+        .for("update");
 
-    return c.json(created, HttpStatusCodes.CREATED);
+      if (!property)
+        return { kind: "not_found" as const };
+
+      // Blackout-vs-blackout is covered by the EXCLUDE constraint, but
+      // blackout-vs-booking spans two tables and cannot be, so check it here
+      // under the lock.
+      const [{ total: bookedHits }] = await tx.select({ total: count() })
+        .from(bookings)
+        .where(and(
+          eq(bookings.propertyId, propertyId),
+          inArray(bookings.status, [...HOLDING_STATUSES]),
+          lt(bookings.checkIn, endDate),
+          gt(bookings.checkOut, startDate),
+        ));
+
+      if (bookedHits > 0)
+        return { kind: "booked" as const };
+
+      const [created] = await tx.insert(propertyBlackouts)
+        .values({ propertyId, startDate, endDate, reason })
+        .returning();
+
+      return { kind: "created" as const, blackout: created };
+    });
+
+    switch (result.kind) {
+      case "not_found":
+        return c.json(
+          { message: HttpStatusPhrases.NOT_FOUND },
+          HttpStatusCodes.NOT_FOUND,
+        );
+      case "booked":
+        return c.json(
+          { message: "These dates are already booked and cannot be blacked out" },
+          HttpStatusCodes.CONFLICT,
+        );
+      case "created":
+        return c.json(result.blackout, HttpStatusCodes.CREATED);
+    }
   }
   catch (err) {
     if (isExclusionViolation(err)) {

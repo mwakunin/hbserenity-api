@@ -33,3 +33,5 @@ test.db
 dist
 
 .dev.vars
+
+coverage

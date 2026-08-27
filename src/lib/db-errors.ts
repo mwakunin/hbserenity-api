@@ -57,3 +57,7 @@ export function isExclusionViolation(err: unknown): boolean {
 export function isCheckViolation(err: unknown): boolean {
   return pgErrorCode(err) === PG_ERRORS.CHECK_VIOLATION;
 }
+
+export function isForeignKeyViolation(err: unknown): boolean {
+  return pgErrorCode(err) === PG_ERRORS.FOREIGN_KEY_VIOLATION;
+}

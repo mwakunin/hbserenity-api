@@ -295,6 +295,57 @@ describe("bookings routes", () => {
       expect(res.status).toBe(409);
     });
 
+    // The mirror of "blocks a booking that overlaps a blackout" — without it,
+    // an admin could mark an already-sold stay as host-blocked.
+    it("409s a blackout over an existing booking", async () => {
+      const booked = await book(guest, propertyId, dayFromNow(10), dayFromNow(15));
+      expect(booked.status).toBe(201);
+
+      const res = await blackout(admin, dayFromNow(12), dayFromNow(18));
+      expect(res.status).toBe(409);
+      expect(JSON.stringify(await res.json())).toMatch(/already booked/i);
+    });
+
+    it("409s a blackout that exactly covers a booking", async () => {
+      await book(guest, propertyId, dayFromNow(10), dayFromNow(15));
+      const res = await blackout(admin, dayFromNow(10), dayFromNow(15));
+      expect(res.status).toBe(409);
+    });
+
+    it("allows a blackout starting on a booking's check-out day", async () => {
+      await book(guest, propertyId, dayFromNow(10), dayFromNow(15));
+
+      // Half-open ranges: the 15th is free the moment the guest leaves.
+      const res = await blackout(admin, dayFromNow(15), dayFromNow(18));
+      expect(res.status).toBe(201);
+    });
+
+    it("allows a blackout over a cancelled booking", async () => {
+      const created = await book(guest, propertyId, dayFromNow(10), dayFromNow(15));
+      const { id } = await created.json();
+
+      await app.request(`/bookings/${id}/cancel`, {
+        method: "POST",
+        headers: guest.headers,
+      });
+
+      const res = await blackout(admin, dayFromNow(10), dayFromNow(15));
+      expect(res.status).toBe(201);
+    });
+
+    it("resolves a concurrent booking and blackout for the same dates", async () => {
+      // These live in different tables, so no EXCLUDE constraint can cover the
+      // pair — the property row lock is what serializes them. Exactly one must
+      // win, or a sold stay ends up marked host-blocked.
+      const [bookRes, blackRes] = await Promise.all([
+        book(guest, propertyId, dayFromNow(70), dayFromNow(75)),
+        blackout(admin, dayFromNow(70), dayFromNow(75)),
+      ]);
+
+      const outcomes = [bookRes.status, blackRes.status].sort();
+      expect(outcomes).toEqual([201, 409]);
+    });
+
     it("422s an end date before the start date", async () => {
       const res = await blackout(admin, dayFromNow(15), dayFromNow(10));
       expect(res.status).toBe(422);

@@ -7,7 +7,7 @@ import type { AppRouteHandler } from "@/lib/types";
 import db from "@/db";
 import { bookings, properties } from "@/db/schema";
 import { ZOD_ERROR_CODES, ZOD_ERROR_MESSAGES } from "@/lib/constants";
-import { isCheckViolation, pgConstraintName } from "@/lib/db-errors";
+import { isCheckViolation, isForeignKeyViolation, pgConstraintName } from "@/lib/db-errors";
 
 import type {
   CreateRoute,
@@ -204,20 +204,30 @@ export const remove: AppRouteHandler<RemoveRoute> = async (c) => {
     );
   }
 
-  // bookings.propertyId is ON DELETE RESTRICT — check first so the caller
-  // gets a clear 409 instead of a foreign-key 500.
+  const conflict = {
+    message: "Property has bookings and cannot be deleted. Deactivate it instead.",
+  };
+
+  // bookings.propertyId is ON DELETE RESTRICT. Counting first gives the caller
+  // a clear 409 in the ordinary case...
   const [{ total }] = await db.select({ total: count() })
     .from(bookings)
     .where(eq(bookings.propertyId, id));
 
-  if (total > 0) {
-    return c.json(
-      { message: "Property has bookings and cannot be deleted. Deactivate it instead." },
-      HttpStatusCodes.CONFLICT,
-    );
-  }
+  if (total > 0)
+    return c.json(conflict, HttpStatusCodes.CONFLICT);
 
-  await db.delete(properties).where(eq(properties.id, id));
+  try {
+    await db.delete(properties).where(eq(properties.id, id));
+  }
+  catch (err) {
+    // ...but the count and the delete are separate statements, so a booking
+    // arriving in between makes the foreign key fire. That is the same
+    // conflict, not a server fault — report it identically rather than 500.
+    if (isForeignKeyViolation(err))
+      return c.json(conflict, HttpStatusCodes.CONFLICT);
+    throw err;
+  }
 
   return c.body(null, HttpStatusCodes.NO_CONTENT);
 };

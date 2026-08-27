@@ -127,9 +127,27 @@ Non-default dev ports are deliberate: another project on this machine binds
   `DrizzleQueryError` and hangs the pg error off `.cause`, so the SQLSTATE
   is never on the top-level error object — walk the cause chain.
 
-  The one gap: **booking-vs-blackout** overlap spans two tables and cannot be
-  an EXCLUDE constraint, so it is checked explicitly inside the booking
-  transaction.
+  **booking-vs-blackout** spans two tables, where no EXCLUDE constraint can
+  reach. Both `create` (booking) and `createBlackout` therefore take a
+  `SELECT ... FOR UPDATE` row lock on the property before checking the other
+  table, which serializes bookings and blackouts for that one property. The
+  lock is what makes those checks trustworthy: without it, a booking and an
+  overlapping blackout each pass their own check concurrently and both
+  commit, leaving a sold stay marked host-blocked. Keep the check **and** the
+  lock on both sides — one side alone is not enough.
+
+  Cost: concurrent bookings for the same property queue behind each other.
+  Different properties are unaffected. Fine for a single-host business, and
+  worth it for the correctness.
+
+- **Read-then-write races: map the constraint, don't just pre-check.** A
+  count-then-delete or check-then-insert pair is two statements, so the row
+  can change in between. Pre-check for a good error message, then catch the
+  constraint violation for the case the pre-check missed — `properties.remove`
+  does this with `23503` (a booking arriving mid-delete still yields 409, not
+  500). `lib/db-errors.ts` holds the SQLSTATE helpers; they are tested against
+  errors drizzle actually throws, since a change in how drizzle wraps errors
+  would silently turn every mapped 409/422 back into a 500.
 
 - **Never trust a client-sent price.** `bookings.totalAmountCents` is always
   computed by `calculateBookingTotal()` in `src/lib/pricing.ts`, the single

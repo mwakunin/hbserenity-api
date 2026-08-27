@@ -145,7 +145,9 @@ export const createBlackout = createRoute({
   summary: "Block dates on a property",
   description:
     "Admin only. Takes dates off the market for maintenance or personal use "
-    + "without creating a fake booking.",
+    + "without creating a fake booking. Returns 409 if the range overlaps "
+    + "either an existing blackout or a booking that already holds the dates "
+    + "— a sold stay can never be silently marked host-blocked.",
   middleware: [requireAuth, requireRole("admin")],
   request: {
     body: jsonContentRequired(createBlackoutSchema, "The blackout to create"),
@@ -160,7 +162,7 @@ export const createBlackout = createRoute({
     [HttpStatusCodes.NOT_FOUND]: jsonContent(notFoundSchema, "Property not found"),
     [HttpStatusCodes.CONFLICT]: jsonContent(
       conflictSchema,
-      "Overlaps an existing blackout",
+      "Overlaps an existing blackout or a booking holding those dates",
     ),
     [HttpStatusCodes.UNPROCESSABLE_ENTITY]: jsonContent(
       createErrorSchema(createBlackoutSchema),
