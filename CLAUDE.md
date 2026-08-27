@@ -6,9 +6,9 @@ Guidance for Claude Code when working in this repository.
 
 A short-term rental management platform for Kenya (Airbnb-style). **Single
 host** — you own and manage the properties; guests browse publicly and must
-verify a phone number to book. Payment is intended to be M-Pesa (STK push),
-but **that is not built yet** — see "Not built yet" below. Bookings are
-created in `pending_payment` and stay there.
+verify a phone number to book, then pay by M-Pesa STK push. A booking is
+created in `pending_payment` and becomes `confirmed` only once Safaricom
+confirms the payment — see the callback rules below, which matter.
 
 This repo currently contains **only the API** — Hono + `@hono/zod-openapi`,
 Drizzle ORM, Postgres (local Docker for dev/test, Neon for staging/prod). It is
@@ -109,9 +109,29 @@ Non-default dev ports are deliberate: another project on this machine binds
   `[checkIn, checkOut)` — the checkout day is immediately bookable by the
   next guest, so back-to-back stays are legal and must stay legal.
 - **Payments are append-only per attempt**: a booking can have multiple
-  `payments` rows (retries). Never overwrite a payment row's status —
-  insert a new attempt instead if the guest retries. `checkoutRequestId` is
-  the idempotency key for matching M-Pesa callbacks back to an attempt.
+  `payments` rows (retries). A **retry inserts a new row** — never reuse or
+  overwrite a previous attempt, so a failure is still on the record after a
+  later success. A row's own status does move once, `pending` → terminal,
+  when its outcome arrives. `checkoutRequestId` is the idempotency key
+  matching a callback back to an attempt.
+
+- **The M-Pesa callback is unauthenticated — treat it as a hint, never as
+  proof.** Safaricom does not sign callbacks, so the endpoint:
+  1. optionally checks the source IP (`MPESA_CALLBACK_ALLOWED_IPS`);
+  2. ignores unknown `checkoutRequestId`s and already-settled payments, so a
+     replay cannot re-confirm anything;
+  3. rejects any callback whose amount differs from the booking total;
+  4. **queries Safaricom directly** (`queryStkStatus`) and confirms only if
+     Safaricom agrees. If that query fails, the payment is left `pending`
+     rather than confirmed — fail closed.
+
+  It also **never returns `checkoutRequestId` to the client**. That id is all
+  the callback needs to identify a payment, so handing it over would let a
+  guest start a real push, cancel it, and forge their own confirmation.
+
+  The endpoint always answers `200 {ResultCode: 0, ResultDesc: "Accepted"}`.
+  Any other status makes Safaricom retry indefinitely.
+
 - **Booking price snapshot**: `bookings.totalAmountCents` is fixed at
   creation time and must never be recalculated from the property's current
   price later.
@@ -272,11 +292,15 @@ Don't weaken them.
 
 Deliberately deferred — don't assume these exist:
 
-- **M-Pesa STK push and the callback handler.** The `payments` table and env
-  vars are in place; no code calls Safaricom yet. When building it: the
-  callback is public and unsigned, so treat it as untrusted, allowlist
-  Safaricom IPs, and re-query transaction status rather than believing the
-  payload.
+- **Payment reconciliation.** If Safaricom is unreachable when a callback
+  arrives, the payment is deliberately left `pending` rather than confirmed.
+  Nothing sweeps those up yet — a job that re-runs `queryStkStatus` over
+  stale pending payments is the missing piece, and until it exists such a
+  booking needs settling by hand.
+- **Refunds.** A payment can succeed against a booking the guest cancelled
+  while the push was in flight. That is recorded truthfully (payment
+  `success`, booking `cancelled`) and left for a human — there is no reversal
+  API call.
 - **Redis rate limiting** (`rate-limiter-flexible`) — Redis runs in compose
   but nothing uses it yet. Tightest limits belong on the STK-push endpoint.
 - **Resend email** and **ImageKit uploads** — env vars only.
@@ -286,7 +310,8 @@ Deliberately deferred — don't assume these exist:
 - **Seasonal / weekend pricing** — one flat `pricePerNightCents` today. Diani
   high season and Nairobi weekday-business rates differ sharply, so a
   `property_rate_overrides` table is likely the next schema change.
-- **Partial deposits** (50%-now-balance-later is common locally),
+- **Partial deposits** (50%-now-balance-later is common locally) — a payment
+  is currently all-or-nothing against `bookings.totalAmountCents`,
   **cancellation metadata** (no `cancelledAt`/reason/refund trail), and a
   **booking idempotency key** so a double-tapped "Book now" can't create two
   bookings.

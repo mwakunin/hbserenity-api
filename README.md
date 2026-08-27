@@ -3,11 +3,10 @@
 Short-term rental booking and management for Kenya. Single host, public
 guests.
 
-> **Status:** the booking core is complete and tested. M-Pesa payment is
-> **not implemented yet** — the `payments` table and configuration are in
-> place, but no code calls Safaricom. Bookings are created in
-> `pending_payment` and stay there. See [CLAUDE.md](./CLAUDE.md) for the full
-> list of what is and isn't built.
+> **Status:** booking and M-Pesa payment are complete and tested against a
+> mocked Safaricom. Add your Daraja credentials to `.env` to run it for real.
+> Not yet built: payment reconciliation, refunds, email, and photo uploads —
+> see [CLAUDE.md](./CLAUDE.md) for the full list.
 
 Built on [Hono](https://hono.dev/) with `@hono/zod-openapi`, Drizzle ORM
 against Postgres, and Better Auth for phone+OTP sign-in. Interactive API docs
@@ -73,6 +72,9 @@ The API is at http://localhost:9999 — API reference at
 | `GET /bookings/{id}`                   | guest  | One booking                                 |
 | `POST /bookings/{id}/cancel`           | guest  | Cancel a `pending_payment` booking          |
 | `POST /blackouts`                      | admin  | Block dates without faking a booking        |
+| `POST /bookings/{id}/pay`              | guest  | Trigger an M-Pesa STK push                  |
+| `GET /bookings/{id}/payments`          | guest  | Every payment attempt, newest first         |
+| `POST /mpesa/callback`                 | —      | Safaricom result callback (verified)        |
 
 ## Design notes
 
@@ -93,6 +95,14 @@ the nights count drifts.
 
 **Money is integer cents with a `CHECK (x % 100 = 0)`.** M-Pesa only transacts
 whole shillings, so the constraint makes an unpayable amount unstorable.
+
+**The M-Pesa callback is never trusted on its own.** Safaricom doesn't sign
+callbacks, and the endpoint is public. A callback claiming success is only a
+hint: the handler checks the amount against the booking, then asks Safaricom
+directly whether the money moved, and confirms only if it agrees. If that
+check can't be made, the payment stays `pending` rather than confirming — it
+fails closed. The `checkoutRequestId` is never returned to the client, so a
+guest can't start a real push, cancel it, and forge their own confirmation.
 
 **Prices are snapshotted.** `bookings.totalAmountCents` is computed server-side
 at creation and never recalculated — changing a property's rate must not

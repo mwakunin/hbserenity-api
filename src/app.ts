@@ -3,6 +3,7 @@ import createApp from "@/lib/create-app";
 import bookings from "@/routes/bookings/bookings.index";
 import health from "@/routes/health.route";
 import index from "@/routes/index.route";
+import payments from "@/routes/payments/payments.index";
 import properties from "@/routes/properties/properties.index";
 
 const app = createApp();
@@ -14,6 +15,7 @@ const routes = [
   health,
   properties,
   bookings,
+  payments,
 ] as const;
 
 routes.forEach((route) => {
