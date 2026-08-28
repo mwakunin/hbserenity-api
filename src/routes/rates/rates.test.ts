@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import type { TestUser } from "@/test/helpers";
 
 import app from "@/app";
-import db from "@/db";
+import db, { pool } from "@/db";
 import { properties } from "@/db/schema";
 import { makeProperty, nextPhone, resetDb, signIn } from "@/test/helpers";
 
@@ -12,6 +12,33 @@ import { makeProperty, nextPhone, resetDb, signIn } from "@/test/helpers";
 const THU = "2026-09-10";
 const FRI = "2026-09-11";
 const SUN = "2026-09-13";
+
+/**
+ * Waits until Postgres reports a backend blocked on a lock.
+ *
+ * A fixed sleep only guesses that contention happened; this asks the database
+ * directly, so the test is deterministic and fails if nothing ever blocks
+ * rather than passing because the timer was generous.
+ *
+ * The window is kept under vitest's default test timeout so a missing lock
+ * surfaces as a failed assertion rather than an opaque "test timed out".
+ */
+async function waitForBlockedBackend(timeoutMs = 2500): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const { rows } = await pool.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM pg_stat_activity
+       WHERE wait_event_type = 'Lock' AND state = 'active'`,
+    );
+    if (rows[0].n > 0)
+      return true;
+
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+
+  return false;
+}
 
 describe("seasonal rates", () => {
   let admin: TestUser;
@@ -248,9 +275,13 @@ describe("seasonal rates", () => {
 
   describe("rate writes and booking price snapshots", () => {
     // Booking creation holds a FOR UPDATE lock on the property while it reads
-    // rates and computes the total. A rate write that did not contend for it
-    // could commit midway, so the snapshot would include or omit the change
-    // depending on timing.
+    // rates and computes the total, so a rate write must not slip in midway.
+    //
+    // For an INSERT this is already guaranteed without the handler's own
+    // lock: the foreign key to properties takes a KEY SHARE lock that
+    // conflicts with FOR UPDATE. So this asserts the property holds, not that
+    // the handler's lock is what provides it — the delete test below is the
+    // one that isolates that.
     it("waits for a transaction holding the property lock", async () => {
       let finished = false;
       let finishedWhileLocked: boolean | null = null;
@@ -272,7 +303,7 @@ describe("seasonal rates", () => {
           return r;
         });
 
-        await new Promise(resolve => setTimeout(resolve, 400));
+        expect(await waitForBlockedBackend()).toBe(true);
         finishedWhileLocked = finished;
       });
 
@@ -312,7 +343,7 @@ describe("seasonal rates", () => {
           return r;
         });
 
-        await new Promise(resolve => setTimeout(resolve, 400));
+        expect(await waitForBlockedBackend()).toBe(true);
         finishedWhileLocked = finished;
       });
 

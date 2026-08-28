@@ -143,8 +143,9 @@ guest can't start a real push, cancel it, and forge their own confirmation.
 optional Friday/Saturday weekend rate, which beats the property's base rate. A
 season priced for Christmas shouldn't be quietly undercut because the 25th
 falls on a Friday. `GET /properties/{id}/quote` shows the breakdown per night
-and why each rate applied, using the same calculation the booking performs — so
-a quote and the charge always agree.
+and why each rate applied, using the same calculation the booking performs. It
+is a quote, not a held price: the booking snapshots rates at booking time, so
+a rate changed in between produces a different total.
 
 **Prices are snapshotted.** `bookings.totalAmountCents` is computed server-side
 at creation and never recalculated — changing a property's rate must not

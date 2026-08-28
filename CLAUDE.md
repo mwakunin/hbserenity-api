@@ -344,8 +344,10 @@ Non-default dev ports are deliberate: another project on this machine binds
   night, so an uncapped range on the public quote is a denial of service
   rather than a large answer: 2020 to 9999 is ~2.9 million objects and ~175MB
   of JSON. The request schemas reject it as a 422 and `nightlyBreakdown`
-  throws as a backstop. `GET /properties/{id}/quote` runs the identical calculation, which
-  is what lets a quote and the eventual charge agree.
+  throws as a backstop. `GET /properties/{id}/quote` runs the identical calculation, so the two agree
+  for a given set of rates — but they are separate requests and the booking
+  snapshots at booking time, so a rate changed in between legitimately yields
+  a different total. Don't document it as a held price.
 
 - **Never trust a client-sent price.** `bookings.totalAmountCents` is always
   computed by `calculateBookingTotal()` in `src/lib/pricing.ts`, the single
