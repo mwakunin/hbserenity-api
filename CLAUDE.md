@@ -320,7 +320,17 @@ Non-default dev ports are deliberate: another project on this machine binds
   The client reports where the file landed, so `isOwnCdnUrl()` rejects
   anything not on the configured endpoint. Unchecked, a listing could be
   pointed at any host on the internet, including one that serves something
-  else later.
+  else later. That prefix must end at a **segment boundary** — a bare
+  `startsWith` on an endpoint of `/account` also accepts `/account-other/...`,
+  a different account on the same host.
+
+  The url and the fileId arrive as two independent claims, so `attach`
+  resolves the id against ImageKit and stores the url **ImageKit reports**. A
+  mismatched pair — easy for a gallery uploading several files at once to
+  produce — would otherwise record one file's address against another's
+  handle, and deleting that row would remove the unrelated file while leaving
+  the displayed one orphaned. If ImageKit cannot be reached, the attach fails
+  with 502 rather than storing an unverified pair.
 
   `property_images.fileId` is NOT NULL and unique. It is ImageKit's handle and
   the only way to delete the stored file — without it a removed photo stays on

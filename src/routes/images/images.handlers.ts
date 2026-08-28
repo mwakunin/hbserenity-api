@@ -7,7 +7,7 @@ import type { AppRouteHandler } from "@/lib/types";
 import db from "@/db";
 import { properties, propertyImages } from "@/db/schema";
 import { isUniqueViolation } from "@/lib/db-errors";
-import { deleteFile, imagekitEnabled, isOwnCdnUrl, uploadAuth } from "@/lib/imagekit";
+import { deleteFile, getFile, imagekitEnabled, isOwnCdnUrl, uploadAuth } from "@/lib/imagekit";
 
 import type {
   AttachRoute,
@@ -47,6 +47,34 @@ export const createUploadAuth: AppRouteHandler<CreateUploadAuthRoute> = async (c
   return c.json(uploadAuth(), HttpStatusCodes.OK);
 };
 
+/** The 422 shape Zod produces, so a client sees one error format. */
+function invalidUrl(
+  c: Parameters<AppRouteHandler<AttachRoute>>[0],
+  message: string,
+  path = "url",
+) {
+  return c.json(
+    {
+      success: false,
+      error: {
+        issues: [{ code: "custom", path: [path], message }],
+        name: "ZodError",
+      },
+    },
+    HttpStatusCodes.UNPROCESSABLE_ENTITY,
+  );
+}
+
+/** Path only: a query string or transformation is not a different file. */
+function pathOf(url: string): string | null {
+  try {
+    return new URL(url).pathname;
+  }
+  catch {
+    return null;
+  }
+}
+
 export const attach: AppRouteHandler<AttachRoute> = async (c) => {
   const { id } = c.req.valid("param");
   const { url, fileId, order, isCover } = c.req.valid("json");
@@ -64,22 +92,38 @@ export const attach: AppRouteHandler<AttachRoute> = async (c) => {
   // The client reports where the file landed. Unchecked, that lets a listing
   // be pointed at any host on the internet — including one that serves
   // something else later.
-  if (!isOwnCdnUrl(url)) {
+  if (!isOwnCdnUrl(url))
+    return invalidUrl(c, "The url must point at this deployment's ImageKit endpoint");
+
+  // Resolve the id with ImageKit rather than trusting that it belongs with the
+  // url beside it. A mismatched pair stores one file's address against
+  // another's handle, and deleting that record later would remove the
+  // unrelated file while leaving the displayed one orphaned on the CDN.
+  let remote;
+  try {
+    remote = await getFile(fileId);
+  }
+  catch (err) {
+    c.var.logger.error({ err, fileId }, "Could not ask ImageKit about the uploaded file");
+
     return c.json(
-      {
-        success: false,
-        error: {
-          issues: [{
-            code: "custom",
-            path: ["url"],
-            message: "The url must point at this deployment's ImageKit endpoint",
-          }],
-          name: "ZodError",
-        },
-      },
-      HttpStatusCodes.UNPROCESSABLE_ENTITY,
+      { message: "ImageKit could not be reached to verify the upload" },
+      HttpStatusCodes.BAD_GATEWAY,
     );
   }
+
+  if (!remote)
+    return invalidUrl(c, "ImageKit has no file with that fileId", "fileId");
+
+  // Defence in depth: what ImageKit reports gets stored and served, so it is
+  // held to the same endpoint rule as what the client claimed.
+  if (!isOwnCdnUrl(remote.url))
+    return invalidUrl(c, "That file is not on this deployment's ImageKit endpoint", "fileId");
+
+  // Compared by path: ImageKit's own url is the authority, and a query string
+  // or transformation on the submitted one is not a mismatch.
+  if (pathOf(remote.url) !== pathOf(url))
+    return invalidUrl(c, "The url does not belong to that fileId");
 
   try {
     const created = await db.transaction(async (tx) => {
@@ -94,7 +138,9 @@ export const attach: AppRouteHandler<AttachRoute> = async (c) => {
 
       const [row] = await tx.insert(propertyImages).values({
         propertyId: id,
-        url,
+        // ImageKit's own url, so the stored address and the stored handle are
+        // guaranteed to describe the same file.
+        url: remote.url,
         fileId,
         order: order ?? 0,
         isCover: isCover ?? false,

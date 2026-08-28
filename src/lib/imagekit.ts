@@ -92,8 +92,16 @@ export function isOwnCdnUrl(url: string): boolean {
 
     // Host and path prefix both: an ImageKit endpoint includes the account's
     // id in its path, so the host alone does not identify it.
+    //
+    // The prefix has to end at a segment boundary. A bare startsWith on an
+    // endpoint of `/account` also matches `/account-other/evil.jpg`, which is
+    // a different account on the same host — so a foreign URL would pass the
+    // ownership guard and be served as a listing photo.
+    const endpointPath = endpoint.pathname.replace(/\/$/, "");
+
     return candidate.origin === endpoint.origin
-      && candidate.pathname.startsWith(endpoint.pathname.replace(/\/$/, ""));
+      && (candidate.pathname === endpointPath
+        || candidate.pathname.startsWith(`${endpointPath}/`));
   }
   catch {
     return false;
@@ -104,6 +112,53 @@ function authHeader(): string {
   // ImageKit uses HTTP Basic with the private key as the username and an empty
   // password, so the colon is required.
   return `Basic ${Buffer.from(`${privateKey()}:`).toString("base64")}`;
+}
+
+export interface RemoteFile {
+  fileId: string;
+  url: string;
+  filePath: string;
+}
+
+/**
+ * Ask ImageKit what it holds under a file id.
+ *
+ * The client reports the id and the url separately, and nothing about the two
+ * has to agree — a mismatched pair (easy enough for a gallery uploading
+ * several files at once to produce) stores one file's address against another
+ * file's handle. Deleting that record would then remove the unrelated file and
+ * leave the displayed one orphaned on the CDN, billed and unreferenced.
+ *
+ * So the id is resolved here and the answer is what gets stored.
+ *
+ * @returns the file, or null if ImageKit has no such id.
+ */
+export async function getFile(fileId: string): Promise<RemoteFile | null> {
+  const res = await fetch(`${API_BASE}/files/${encodeURIComponent(fileId)}/details`, {
+    headers: { authorization: authHeader() },
+    signal: AbortSignal.timeout(10_000),
+  });
+
+  if (res.status === 404)
+    return null;
+
+  if (!res.ok) {
+    throw new ImageKitError(
+      `ImageKit would not describe ${fileId}: ${res.status}`,
+      res.status,
+    );
+  }
+
+  const body = await res.json() as { fileId?: string; url?: string; filePath?: string };
+
+  if (!body.url || !body.filePath) {
+    throw new ImageKitError(
+      `ImageKit described ${fileId} without a url`,
+      res.status,
+    );
+  }
+
+  return { fileId: body.fileId ?? fileId, url: body.url, filePath: body.filePath };
 }
 
 /**

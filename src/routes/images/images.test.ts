@@ -15,6 +15,45 @@ function imageUrl(name: string) {
   return `${ENDPOINT}/${name}`;
 }
 
+/**
+ * Stands in for ImageKit.
+ *
+ * Attaching resolves the fileId against the API rather than trusting the url
+ * beside it, so the fake has to know which id holds which file — a mock that
+ * answered every lookup identically would let a mismatched pair through and
+ * the test would prove nothing.
+ */
+function mockImageKit(files: Record<string, string> = {
+  "file-a": imageUrl("a.jpg"),
+  "file-b": imageUrl("b.jpg"),
+}) {
+  const fn = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
+    const requested = String(input);
+    const details = requested.match(/\/files\/([^/]+)\/details$/);
+
+    if (details) {
+      const id = decodeURIComponent(details[1]);
+      const url = files[id];
+
+      if (!url)
+        return new Response(JSON.stringify({ message: "No file found" }), { status: 404 });
+
+      return new Response(
+        JSON.stringify({ fileId: id, url, filePath: new URL(url).pathname }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+
+    if (init?.method === "DELETE")
+      return new Response(null, { status: 204 });
+
+    return new Response(null, { status: 404 });
+  });
+
+  vi.stubGlobal("fetch", fn);
+  return fn;
+}
+
 describe("property images", () => {
   let admin: TestUser;
   let guest: TestUser;
@@ -26,6 +65,7 @@ describe("property images", () => {
     guest = await signIn(nextPhone());
     const property = await makeProperty(admin.id);
     propertyId = property.id;
+    mockImageKit();
   });
 
   afterEach(() => vi.unstubAllGlobals());
@@ -125,6 +165,64 @@ describe("property images", () => {
         "4651e634-a530-4484-9b09-9616a28f35e3",
       );
       expect(res.status).toBe(404);
+    });
+
+    // A same-host neighbouring account. A plain prefix test accepts these,
+    // because "/hbserenity-test" is a prefix of "/hbserenity-test-other".
+    it.each([
+      `https://ik.imagekit.io/hbserenity-test-other/a.jpg`,
+      `https://ik.imagekit.io/hbserenity-testing/a.jpg`,
+    ])("422s a neighbouring account's path: %s", async (url) => {
+      // Reported by ImageKit too, so the url/fileId comparison agrees and the
+      // endpoint guard is the only thing left that can reject it.
+      mockImageKit({ "file-a": url });
+
+      const res = await attach(admin, { url, fileId: "file-a" });
+
+      expect(res.status).toBe(422);
+      expect(await db.select().from(propertyImages)).toHaveLength(0);
+    });
+
+    // The url and the fileId arrive as separate claims and nothing makes them
+    // agree. Stored mismatched, deleting the record would remove the unrelated
+    // file and leave the displayed one orphaned on the CDN.
+    it("422s a url paired with another file's id", async () => {
+      const res = await attach(admin, { url: imageUrl("a.jpg"), fileId: "file-b" });
+
+      expect(res.status).toBe(422);
+      expect(JSON.stringify(await res.json())).toMatch(/does not belong/i);
+      expect(await db.select().from(propertyImages)).toHaveLength(0);
+    });
+
+    it("422s a fileId ImageKit has never heard of", async () => {
+      const res = await attach(admin, { url: imageUrl("a.jpg"), fileId: "no-such-file" });
+
+      expect(res.status).toBe(422);
+      expect(await db.select().from(propertyImages)).toHaveLength(0);
+    });
+
+    // ImageKit is the authority on where its own file lives.
+    it("stores the url ImageKit reports, not the one submitted", async () => {
+      mockImageKit({ "file-a": imageUrl("canonical.jpg") });
+
+      const res = await attach(admin, {
+        url: `${imageUrl("canonical.jpg")}?tr=w-400`,
+        fileId: "file-a",
+      });
+
+      expect(res.status).toBe(201);
+      expect((await res.json()).url).toBe(imageUrl("canonical.jpg"));
+    });
+
+    // Storing an unverified pair would be worse than refusing the request.
+    it("502s rather than storing anything when ImageKit is unreachable", async () => {
+      vi.stubGlobal("fetch", vi.fn<typeof fetch>()
+        .mockRejectedValue(new Error("network down")));
+
+      const res = await attach(admin, { url: imageUrl("a.jpg"), fileId: "file-a" });
+
+      expect(res.status).toBe(502);
+      expect(await db.select().from(propertyImages)).toHaveLength(0);
     });
   });
 

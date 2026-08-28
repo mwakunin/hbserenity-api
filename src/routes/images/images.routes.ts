@@ -79,6 +79,10 @@ export const attach = createRoute({
       conflictSchema,
       "That file is already attached, or image hosting is not configured",
     ),
+    [HttpStatusCodes.BAD_GATEWAY]: jsonContent(
+      conflictSchema,
+      "ImageKit could not be reached to verify the upload",
+    ),
     [HttpStatusCodes.UNPROCESSABLE_ENTITY]: jsonContent(
       createErrorSchema(attachImageSchema),
       "The validation error(s)",
