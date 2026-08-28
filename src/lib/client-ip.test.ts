@@ -9,11 +9,10 @@ import { resolveClientIp } from "./client-ip";
  */
 describe("resolveClientIp", () => {
   describe("with no trusted proxies (the default)", () => {
-    it("uses the socket address and ignores headers entirely", () => {
+    it("uses the socket address and ignores the forwarded chain", () => {
       expect(resolveClientIp({
         socketAddress: "203.0.113.9",
         xForwardedFor: "1.2.3.4",
-        xRealIp: "5.6.7.8",
       }, 0)).toBe("203.0.113.9");
     });
 
@@ -78,13 +77,6 @@ describe("resolveClientIp", () => {
   });
 
   describe("fallbacks", () => {
-    it("uses X-Real-IP when a trusted edge is declared but sends no chain", () => {
-      expect(resolveClientIp({
-        socketAddress: "10.0.0.1",
-        xRealIp: "203.0.113.9",
-      }, 1)).toBe("203.0.113.9");
-    });
-
     it("falls back to the socket when the chain is shorter than the hop count", () => {
       // Misconfiguration, or a request that skipped a proxy. The socket
       // address is always real, so it is the safe answer.

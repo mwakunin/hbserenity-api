@@ -94,6 +94,22 @@ describe("rate limiting", () => {
     })).status).toBe(429);
   });
 
+  // X-Real-IP carries no hop structure, so a proxy-set value and a forged one
+  // are indistinguishable. It must never be consulted.
+  //
+  // Deliberately sends NO X-Forwarded-For: with one present the chain
+  // resolves first and this path is never reached, so the test would pass
+  // whether or not the fallback exists.
+  it("cannot be bypassed by rotating X-Real-IP", async () => {
+    for (let i = 0; i < 3; i += 1)
+      await app.request("/limited", { headers: { "x-real-ip": `1.1.1.${i}` } });
+
+    // A fresh X-Real-IP must not buy a fresh budget.
+    expect((await app.request("/limited", {
+      headers: { "x-real-ip": "9.9.9.9" },
+    })).status).toBe(429);
+  });
+
   it("still separates genuinely different callers behind the same proxy", async () => {
     for (let i = 0; i < 3; i += 1) {
       await app.request("/limited", {

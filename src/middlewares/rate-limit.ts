@@ -64,7 +64,6 @@ function anonymousKey(c: Context<AppBindings>): string {
     {
       socketAddress,
       xForwardedFor: c.req.header("x-forwarded-for"),
-      xRealIp: c.req.header("x-real-ip"),
     },
     env.TRUST_PROXY_HOPS,
   ) ?? "unknown";

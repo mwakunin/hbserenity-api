@@ -1,6 +1,10 @@
 /**
  * Identifying the caller for rate limiting.
  *
+ * Only `X-Forwarded-For` is ever consulted, and only from the right. Headers
+ * without hop structure — `X-Real-IP` and friends — are ignored outright:
+ * there is no way to distinguish one your proxy set from one the client sent.
+ *
  * `X-Forwarded-For` is written by whoever sends the request, so trusting it
  * blindly makes anonymous rate limiting worthless: rotating the header yields
  * a fresh counter per request. It is only meaningful when you know how many
@@ -15,7 +19,6 @@ export interface ClientIpSources {
   /** The TCP peer address. Cannot be forged by the client. */
   socketAddress?: string;
   xForwardedFor?: string;
-  xRealIp?: string;
 }
 
 /**
@@ -45,11 +48,14 @@ export function resolveClientIp(
   if (candidate)
     return candidate;
 
-  // Some proxies set only X-Real-IP. It carries no hop structure, so it is
-  // all-or-nothing — acceptable here only because a trusted edge is declared.
-  const realIp = sources.xRealIp?.trim();
-  if (realIp)
-    return realIp;
-
+  // Chain missing or shorter than declared — a misconfiguration, or a request
+  // that skipped a proxy. Fall back to the socket, which is always real.
+  //
+  // X-Real-IP is deliberately NOT consulted here. It carries no hop
+  // structure, so there is no way to tell one your proxy set from one the
+  // client sent, and a client that can reach this branch could rotate it for
+  // a fresh counter per request. A proxy that sets only X-Real-IP should be
+  // configured to set X-Forwarded-For instead; until then everyone behind it
+  // shares the proxy's bucket, which is degraded but not bypassable.
   return socket;
 }
