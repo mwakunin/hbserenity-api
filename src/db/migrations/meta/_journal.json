@@ -43,6 +43,20 @@
       "when": 1787854263998,
       "tag": "0005_backfill_push_dispatched_at",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1787900688269,
+      "tag": "0006_account_issuer",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1787904070133,
+      "tag": "0007_account_issuer_unique",
+      "breakpoints": true
     }
   ]
 }

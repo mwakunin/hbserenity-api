@@ -6,7 +6,7 @@ Guidance for Claude Code when working in this repository.
 
 A short-term rental management platform for Kenya (Airbnb-style). **Single
 host** — you own and manage the properties; guests browse publicly and must
-verify a phone number to book, then pay by M-Pesa STK push. A booking is
+sign in and book, then pay by M-Pesa STK push. A booking is
 created in `pending_payment` and becomes `confirmed` only once Safaricom
 confirms the payment — see the callback rules below, which matter.
 
@@ -293,6 +293,39 @@ Non-default dev ports are deliberate: another project on this machine binds
   Neon — dev on `rentals_dev` (:5434), test on `rentals_test` (:5433, tmpfs,
   disposable). Neon is only used for staging/prod; confirm `DATABASE_URL`
   before running migrations if it's ever pointed at a Neon branch.
+- **Sign-in methods.** Email+password is the one that works today and is what
+  keeps the API bootable. Google is registered only when both
+  `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` are set. **Phone+OTP is fully
+  implemented but dormant** — the plugin, columns and endpoints are all in
+  place, and `sendOTP` throws in production until an SMS provider is wired.
+  Enabling it means three things, not one: implement the send in `sendOTP`
+  (it currently throws), add the provider's credentials to `env.ts`, and set
+  `phoneOtpEnabled`. Everything around it — plugin, columns, endpoints, the
+  OTP verification flow — is already there. Phone remains the right primary for Kenyan guests (the verified
+  number is the one M-Pesa charges), so none of it was removed.
+
+  `activeAuthMethods` refuses to start if _no_ method is usable. Email+password
+  has no external dependency so that never fires today — the check exists so
+  that disabling it later fails loudly instead of serving an API nobody can
+  sign in to.
+
+  **Email verification is required wherever mail can be sent** — it tracks
+  `emailEnabled` (both `RESEND_API_KEY` and `RESEND_FROM_EMAIL`), which
+  production mandates. It matters because `user.email` is UNIQUE: without
+  verification, sign-up hands a session to whoever types an address first, and
+  they permanently hold it. With it, an unverified sign-up gets **no session**
+  and the real owner receives the mail. Account _takeover_ via Google is
+  separately prevented by Better Auth's `requireLocalEmailVerified`, which
+  defaults to true so an OAuth identity is never linked into an unverified
+  local row.
+
+  Residual, and unavoidable without more work: the unverified row still
+  occupies the address, so a determined attacker can block registration of an
+  email they don't own. They gain nothing from it.
+
+  An email-only guest has no phone number, so `POST /bookings/{id}/pay` needs
+  one in the body; it already 422s clearly when neither is available.
+
 - **Identity model resolved**: Better Auth owns `user`, `session`, `account`,
   `verification` in `src/db/auth-schema.ts` (generated via
   `npx @better-auth/cli@latest generate --config src/lib/auth.ts --output
@@ -300,7 +333,7 @@ src/db/auth-schema.ts --yes`, phoneNumber plugin enabled — phone+OTP is
   the primary login method, not email/password). There is no separate
   app-level `users` table. `user.role` (`"guest" | "host" | "admin"`) is a
   Better Auth `additionalField`.
-- **Two deviations from raw CLI output must be reapplied after regenerating**
+- **Five deviations from raw CLI output must be reapplied after regenerating**
   (both documented in the file's own header):
   1. `user.role` gets `.notNull()` — the CLI emits it nullable, which would
      force a null-check at every authorization site.

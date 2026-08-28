@@ -23,6 +23,7 @@ const PRODUCTION_REQUIRED = [
   "MPESA_PASSKEY",
   "MPESA_CALLBACK_URL",
   "RESEND_API_KEY",
+  "RESEND_FROM_EMAIL",
   "IMAGEKIT_PUBLIC_KEY",
   "IMAGEKIT_PRIVATE_KEY",
   "IMAGEKIT_URL_ENDPOINT",
@@ -58,8 +59,14 @@ const EnvSchema = z.object({
    */
   MPESA_CALLBACK_ALLOWED_IPS: z.string().optional(),
 
+  // --- Google sign-in (optional; enabled only when both are present) ---
+  GOOGLE_CLIENT_ID: z.string().optional(),
+  GOOGLE_CLIENT_SECRET: z.string().optional(),
+
   // --- Email (Resend) ---
   RESEND_API_KEY: z.string().optional(),
+  /** From-address for verification mail. Required alongside RESEND_API_KEY. */
+  RESEND_FROM_EMAIL: z.string().optional(),
 
   // --- Image CDN (ImageKit) ---
   IMAGEKIT_PUBLIC_KEY: z.string().optional(),
@@ -85,6 +92,26 @@ const EnvSchema = z.object({
           message: "Must be a publicly reachable HTTPS URL",
         });
       }
+    }
+
+    // Paired credentials are checked in every environment, not just
+    // production. Half a pair silently disables the feature — Google simply
+    // isn't offered, email verification quietly isn't required — which is
+    // precisely the failure you'd waste time debugging locally.
+    if (Boolean(input.RESEND_API_KEY) !== Boolean(input.RESEND_FROM_EMAIL)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["RESEND_FROM_EMAIL"],
+        message: "Set both RESEND_API_KEY and RESEND_FROM_EMAIL, or neither",
+      });
+    }
+
+    if (Boolean(input.GOOGLE_CLIENT_ID) !== Boolean(input.GOOGLE_CLIENT_SECRET)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["GOOGLE_CLIENT_SECRET"],
+        message: "Set both GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET, or neither",
+      });
     }
 
     // Guard against a stray `pnpm test` running against — and truncating —

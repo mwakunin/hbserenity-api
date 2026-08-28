@@ -142,3 +142,40 @@ export function dayFromNow(offset: number) {
   d.setUTCDate(d.getUTCDate() + offset);
   return d.toISOString().slice(0, 10);
 }
+
+/**
+ * Signs up and signs in with email+password — the method that works while SMS
+ * is deferred, and the one most guests will actually use today.
+ */
+export async function signUpWithEmail(
+  email: string,
+  password = "correct-horse-battery",
+  name = "Test Guest",
+): Promise<TestUser> {
+  const res = await postJson("/api/auth/sign-up/email", { email, password, name });
+  if (!res.ok)
+    throw new Error(`sign-up failed: ${res.status} ${await res.text()}`);
+
+  const setCookie = res.headers.get("set-cookie");
+  if (!setCookie)
+    throw new Error("sign-up returned no session cookie");
+
+  const cookie = setCookie
+    .split(/,(?=\s*[^;=\s]+=)/)
+    .map(c => c.split(";")[0].trim())
+    .join("; ");
+
+  const [row] = await db.select({ id: user.id }).from(user).where(eq(user.email, email));
+  if (!row)
+    throw new Error(`User row missing after sign-up for ${email}`);
+
+  return { id: row.id, phoneNumber: "", headers: { cookie } };
+}
+
+let emailCounter = 0;
+
+/** Unique address, so tests never collide on user.email's unique index. */
+export function nextEmail() {
+  emailCounter += 1;
+  return `guest${emailCounter}@example.test`;
+}
