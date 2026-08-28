@@ -3,8 +3,9 @@ import * as HttpStatusCodes from "stoker/http-status-codes";
 import { jsonContent, jsonContentRequired } from "stoker/openapi/helpers";
 import { createErrorSchema, IdUUIDParamsSchema } from "stoker/openapi/schemas";
 
-import { conflictSchema, notFoundSchema, unauthorizedSchema } from "@/lib/constants";
+import { conflictSchema, notFoundSchema, tooManyRequestsSchema, unauthorizedSchema } from "@/lib/constants";
 import { requireAuth } from "@/middlewares/auth";
+import { rateLimits } from "@/middlewares/rate-limit";
 
 import {
   initiatePaymentResponseSchema,
@@ -25,7 +26,7 @@ export const initiate = createRoute({
     "Prompts the guest's handset for a PIN. Returns as soon as Safaricom "
     + "accepts the request — the booking is NOT confirmed here. Confirmation "
     + "happens when the callback arrives and is verified against Safaricom.",
-  middleware: [requireAuth],
+  middleware: [requireAuth, rateLimits.payment()],
   request: {
     params: IdUUIDParamsSchema,
     body: jsonContentRequired(initiatePaymentSchema, "Optional paying number"),
@@ -44,6 +45,10 @@ export const initiate = createRoute({
     [HttpStatusCodes.UNPROCESSABLE_ENTITY]: jsonContent(
       createErrorSchema(initiatePaymentSchema),
       "Invalid phone number",
+    ),
+    [HttpStatusCodes.TOO_MANY_REQUESTS]: jsonContent(
+      tooManyRequestsSchema,
+      "Too many payment attempts",
     ),
     [HttpStatusCodes.BAD_GATEWAY]: jsonContent(
       notFoundSchema,
@@ -78,11 +83,15 @@ export const listForBooking = createRoute({
   description:
     "Every STK push attempt, newest first. Retries are separate rows, so this "
     + "is the full audit trail rather than just the current state.",
-  middleware: [requireAuth],
+  middleware: [requireAuth, rateLimits.read()],
   request: {
     params: IdUUIDParamsSchema,
   },
   responses: {
+    [HttpStatusCodes.TOO_MANY_REQUESTS]: jsonContent(
+      tooManyRequestsSchema,
+      "Rate limit exceeded",
+    ),
     [HttpStatusCodes.OK]: jsonContent(listPaymentsResponseSchema, "The attempts"),
     [HttpStatusCodes.UNAUTHORIZED]: jsonContent(unauthorizedSchema, "Not signed in"),
     [HttpStatusCodes.NOT_FOUND]: jsonContent(notFoundSchema, "Booking not found"),

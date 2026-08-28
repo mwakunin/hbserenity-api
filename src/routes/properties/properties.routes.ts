@@ -3,8 +3,9 @@ import * as HttpStatusCodes from "stoker/http-status-codes";
 import { jsonContent, jsonContentRequired } from "stoker/openapi/helpers";
 import { createErrorSchema, IdUUIDParamsSchema } from "stoker/openapi/schemas";
 
-import { forbiddenSchema, notFoundSchema, unauthorizedSchema } from "@/lib/constants";
+import { forbiddenSchema, notFoundSchema, tooManyRequestsSchema, unauthorizedSchema } from "@/lib/constants";
 import { requireAuth, requireRole } from "@/middlewares/auth";
+import { rateLimits } from "@/middlewares/rate-limit";
 
 import {
   insertPropertySchema,
@@ -22,7 +23,7 @@ const tags = ["Properties"];
  * than a shared array so each route gets its own mutable instance — Hono's
  * `middleware` field rejects a readonly tuple.
  */
-const adminOnly = () => [requireAuth, requireRole("admin")];
+const adminOnly = () => [requireAuth, requireRole("admin"), rateLimits.write()];
 
 export const list = createRoute({
   path: "/properties",
@@ -32,10 +33,15 @@ export const list = createRoute({
   description:
     "Public. Only returns properties with status 'active' — drafts and "
     + "deactivated listings are never exposed here.",
+  middleware: [rateLimits.read()],
   request: {
     query: listPropertiesQuerySchema,
   },
   responses: {
+    [HttpStatusCodes.TOO_MANY_REQUESTS]: jsonContent(
+      tooManyRequestsSchema,
+      "Rate limit exceeded",
+    ),
     [HttpStatusCodes.OK]: jsonContent(
       listPropertiesResponseSchema,
       "A page of active properties",
@@ -52,10 +58,15 @@ export const getOne = createRoute({
   method: "get",
   tags,
   summary: "Get one listing with its images and amenities",
+  middleware: [rateLimits.read()],
   request: {
     params: IdUUIDParamsSchema,
   },
   responses: {
+    [HttpStatusCodes.TOO_MANY_REQUESTS]: jsonContent(
+      tooManyRequestsSchema,
+      "Rate limit exceeded",
+    ),
     [HttpStatusCodes.OK]: jsonContent(propertyWithImagesSchema, "The property"),
     [HttpStatusCodes.NOT_FOUND]: jsonContent(notFoundSchema, "Property not found"),
     [HttpStatusCodes.UNPROCESSABLE_ENTITY]: jsonContent(
@@ -75,6 +86,10 @@ export const create = createRoute({
     body: jsonContentRequired(insertPropertySchema, "The property to create"),
   },
   responses: {
+    [HttpStatusCodes.TOO_MANY_REQUESTS]: jsonContent(
+      tooManyRequestsSchema,
+      "Rate limit exceeded",
+    ),
     [HttpStatusCodes.CREATED]: jsonContent(selectPropertySchema, "The created property"),
     [HttpStatusCodes.UNAUTHORIZED]: jsonContent(unauthorizedSchema, "Not signed in"),
     [HttpStatusCodes.FORBIDDEN]: jsonContent(forbiddenSchema, "Not an admin"),
@@ -96,6 +111,10 @@ export const patch = createRoute({
     body: jsonContentRequired(patchPropertySchema, "The updates"),
   },
   responses: {
+    [HttpStatusCodes.TOO_MANY_REQUESTS]: jsonContent(
+      tooManyRequestsSchema,
+      "Rate limit exceeded",
+    ),
     [HttpStatusCodes.OK]: jsonContent(selectPropertySchema, "The updated property"),
     [HttpStatusCodes.UNAUTHORIZED]: jsonContent(unauthorizedSchema, "Not signed in"),
     [HttpStatusCodes.FORBIDDEN]: jsonContent(forbiddenSchema, "Not an admin"),
@@ -120,6 +139,10 @@ export const remove = createRoute({
     params: IdUUIDParamsSchema,
   },
   responses: {
+    [HttpStatusCodes.TOO_MANY_REQUESTS]: jsonContent(
+      tooManyRequestsSchema,
+      "Rate limit exceeded",
+    ),
     [HttpStatusCodes.NO_CONTENT]: { description: "Property deleted" },
     [HttpStatusCodes.UNAUTHORIZED]: jsonContent(unauthorizedSchema, "Not signed in"),
     [HttpStatusCodes.FORBIDDEN]: jsonContent(forbiddenSchema, "Not an admin"),

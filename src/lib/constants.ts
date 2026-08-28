@@ -1,3 +1,4 @@
+import { z } from "@hono/zod-openapi";
 import * as HttpStatusPhrases from "stoker/http-status-phrases";
 import { createMessageObjectSchema } from "stoker/openapi/schemas";
 
@@ -15,6 +16,17 @@ export const ZOD_ERROR_CODES = {
 export const notFoundSchema = createMessageObjectSchema(HttpStatusPhrases.NOT_FOUND);
 export const unauthorizedSchema = createMessageObjectSchema(HttpStatusPhrases.UNAUTHORIZED);
 export const forbiddenSchema = createMessageObjectSchema(HttpStatusPhrases.FORBIDDEN);
+
+/** Returned when a caller exceeds a rate limit. */
+/**
+ * Mirrors what `rateLimit()` returns, including the retry hint — a documented
+ * response that omits half the body is worse than none, since clients generate
+ * against it.
+ */
+export const tooManyRequestsSchema = z.object({
+  message: z.string(),
+  retryAfterSeconds: z.number().int().positive(),
+});
 
 /** Returned when a booking collides with an existing one or a blackout. */
 export const conflictSchema = createMessageObjectSchema(

@@ -7,12 +7,28 @@ import db, { pool } from "@/db";
 import { properties, user } from "@/db/schema";
 import { sentOtps } from "@/lib/auth";
 import { normalizeKenyanPhone } from "@/lib/phone";
+import { redis } from "@/lib/redis";
 
 /**
  * Wipes every table between tests. Discovered dynamically so a new table
  * doesn't silently start leaking state across tests.
  */
+/**
+ * Clears rate-limit counters so each test starts with a full budget.
+ *
+ * Every test request arrives with no IP, so they all share one key — without
+ * this, later tests in a file would be throttled by earlier ones and fail for
+ * reasons unrelated to what they assert.
+ */
+export async function resetRateLimits() {
+  const keys = await redis.keys("rl:*");
+  if (keys.length > 0)
+    await redis.del(...keys);
+}
+
 export async function resetDb() {
+  await resetRateLimits();
+
   const { rows } = await pool.query<{ tablename: string }>(`
     SELECT tablename FROM pg_tables
     WHERE schemaname = 'public' AND tablename <> '__drizzle_migrations'

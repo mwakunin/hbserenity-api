@@ -24,9 +24,8 @@ present; when it arrives, move the API to `apps/api` and add `apps/web`.
 - **Cache / rate-limit store**: Redis (local Docker for dev/test)
 - **Auth**: Better Auth
 - **Rate limiting**: `rate-limiter-flexible` with its Redis store — chosen over
-  in-memory limiters because it works correctly across multiple API instances
-  sharing one Redis. Apply tighter limits on the M-Pesa STK-push endpoint
-  specifically.
+  in-memory limiters because counters must be shared across instances; N
+  in-memory limiters allow N times the traffic. See the conventions below.
 - **Email**: Resend, for transactional email (booking confirmations, payment
   receipts, host notifications)
 - **Image CDN**: ImageKit, for property photo storage/delivery and on-the-fly
@@ -223,6 +222,35 @@ Non-default dev ports are deliberate: another project on this machine binds
   successful push the booking is re-read, and a prompt sent against an
   already-settled booking is flagged on the payment for refund review. Keep
   that flag; it is the only trace of a genuine duplicate charge.
+
+- **Rate limits are per endpoint group, not global** (`middlewares/rate-limit.ts`),
+  because abusing different endpoints costs wildly different amounts. An STK
+  push spends money and rings a real phone; browsing listings costs a query.
+  The presets in `rateLimits` are the vocabulary — add to those rather than
+  hand-rolling numbers at a call site.
+
+  Signed-in callers are keyed by **account, not address**, so one person on a
+  NAT'd or shared connection cannot exhaust everyone else's budget, and
+  changing networks is not a way around a limit.
+
+  Anonymous callers are keyed by an address resolved in `lib/client-ip.ts`,
+  **never by a raw header**. `X-Forwarded-For` is written by the sender, so
+  reading its leftmost entry means rotating the header yields a fresh counter
+  per request — no rate limiting at all. Resolution uses the socket address
+  unless `TRUST_PROXY_HOPS` declares how many of your own proxies sit in
+  front; the trustworthy entry is then counted from the RIGHT, where your edge
+  wrote it. Set that variable to the real hop count: too high reintroduces the
+  bypass, and 0 (the default) is correct for direct exposure.
+
+  The limiter **fails open**: if Redis is unreachable the request is allowed
+  and the degradation logged. A cache outage must not become a total outage,
+  and the endpoints that matter have structural guards anyway — one pending
+  payment per booking, the booking overlap constraint.
+
+  Two endpoints are deliberately **not** limited: `POST /mpesa/callback`,
+  because Safaricom retries and a dropped callback loses track of real money;
+  and `GET /health`, because monitoring hits it constantly and throttling it
+  would fake an outage.
 
 - **Never release a stale attempt on a timer alone.** The STK request has no
   guaranteed lifetime, so assuming a prompt died after N seconds can leave

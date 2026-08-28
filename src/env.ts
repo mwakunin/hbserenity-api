@@ -59,6 +59,26 @@ const EnvSchema = z.object({
    */
   MPESA_CALLBACK_ALLOWED_IPS: z.string().optional(),
 
+  /**
+   * How many of your own proxies sit in front of the app.
+   *
+   * 0 (default) means it is exposed directly, so X-Forwarded-For is ignored
+   * entirely — trusting it would let anyone reset their own rate limit by
+   * rotating the header. Set to the real number of hops when deployed behind
+   * a load balancer; setting it too high reintroduces the bypass.
+   */
+  TRUST_PROXY_HOPS: z.coerce.number().int().min(0).max(10).default(0),
+
+  /**
+   * Comma-separated addresses allowed to have written X-Forwarded-For.
+   *
+   * TRUST_PROXY_HOPS on its own assumes every request came through your proxy.
+   * If the app is also reachable directly, an attacker connects to it and
+   * supplies their own chain. Either make direct access impossible at the
+   * network layer, or list the proxy addresses here.
+   */
+  TRUSTED_PROXY_IPS: z.string().optional(),
+
   // --- Google sign-in (optional; enabled only when both are present) ---
   GOOGLE_CLIENT_ID: z.string().optional(),
   GOOGLE_CLIENT_SECRET: z.string().optional(),

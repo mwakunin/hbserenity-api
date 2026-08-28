@@ -81,6 +81,34 @@ The API is at http://localhost:9999 — API reference at
 | `POST /admin/payments/reconcile`       | admin  | Settle payments whose outcome was lost (needs external cron &mdash; see below) |
 | `GET /admin/payments/attention`        | admin  | Payments needing a human                                                       |
 
+## Rate limiting
+
+Backed by Redis so counters are shared across instances. Limits are per
+endpoint group, because abusing them costs different amounts:
+
+| Group        | Limit     | Why                                         |
+| ------------ | --------- | ------------------------------------------- |
+| Auth         | 10 / min  | Brute force and account enumeration         |
+| Payment      | 5 / 5 min | Each STK push costs money and rings a phone |
+| Writes       | 30 / min  | Bookings, blackouts, listing changes        |
+| Public reads | 120 / min | The traffic we actually want                |
+
+Signed-in callers are limited per account rather than per address. Anonymous
+callers are keyed by socket address; `X-Forwarded-For` is only consulted when
+`TRUST_PROXY_HOPS` says how many of your proxies are in front, and then only
+from the right of the chain — otherwise anyone could rotate the header for a
+fresh limit. **Set `TRUST_PROXY_HOPS` to your real hop count when deploying
+behind a load balancer**, or client addresses will all look like the balancer.
+
+That setting assumes every request arrives through that balancer. If the app
+is also reachable directly, either bind it so it isn't, or list the balancer
+in `TRUSTED_PROXY_IPS` — otherwise someone can connect straight to it and
+supply their own forwarding chain.
+
+If Redis is unreachable the limiter fails open and logs — a cache outage
+should not be a total outage. `POST /mpesa/callback` and `GET /health` are
+exempt.
+
 ## Design notes
 
 **Double-booking is impossible, not merely checked.** `bookings` carries a

@@ -7,6 +7,7 @@ import { defaultHook } from "stoker/openapi";
 
 import { withSession } from "@/middlewares/auth";
 import { pinoLogger } from "@/middlewares/pino-logger";
+import { rateLimits } from "@/middlewares/rate-limit";
 
 import type { AppBindings, AppOpenAPI } from "./types";
 
@@ -27,7 +28,15 @@ export default function createApp() {
 
   // Better Auth owns everything under /api/auth — sign-in, OTP, sign-out.
   // Mounted before withSession so the handler manages its own cookies.
-  app.on(["GET", "POST"], "/api/auth/*", c => auth.handler(c.req.raw));
+  //
+  // Rate limited by IP: these are the brute-force and enumeration targets, and
+  // the caller is by definition not yet authenticated.
+  app.on(
+    ["GET", "POST"],
+    "/api/auth/*",
+    rateLimits.auth(),
+    c => auth.handler(c.req.raw),
+  );
 
   // Resolves the session onto every request; routes opt into requiring it.
   app.use(withSession);

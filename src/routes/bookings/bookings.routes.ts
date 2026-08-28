@@ -3,13 +3,9 @@ import * as HttpStatusCodes from "stoker/http-status-codes";
 import { jsonContent, jsonContentRequired } from "stoker/openapi/helpers";
 import { createErrorSchema, IdUUIDParamsSchema } from "stoker/openapi/schemas";
 
-import {
-  conflictSchema,
-  forbiddenSchema,
-  notFoundSchema,
-  unauthorizedSchema,
-} from "@/lib/constants";
+import { conflictSchema, forbiddenSchema, notFoundSchema, tooManyRequestsSchema, unauthorizedSchema } from "@/lib/constants";
 import { requireAuth, requireRole } from "@/middlewares/auth";
+import { rateLimits } from "@/middlewares/rate-limit";
 
 import {
   availabilityQuerySchema,
@@ -36,7 +32,12 @@ export const availability = createRoute({
     params: IdUUIDParamsSchema,
     query: availabilityQuerySchema,
   },
+  middleware: [rateLimits.read()],
   responses: {
+    [HttpStatusCodes.TOO_MANY_REQUESTS]: jsonContent(
+      tooManyRequestsSchema,
+      "Rate limit exceeded",
+    ),
     [HttpStatusCodes.OK]: jsonContent(availabilityResponseSchema, "Unavailable ranges"),
     [HttpStatusCodes.NOT_FOUND]: jsonContent(notFoundSchema, "Property not found"),
     [HttpStatusCodes.UNPROCESSABLE_ENTITY]: jsonContent(
@@ -54,11 +55,15 @@ export const create = createRoute({
   description:
     "The total is computed server-side from the property's current rate and "
     + "snapshotted onto the booking. Returns 409 if the dates are taken.",
-  middleware: [requireAuth],
+  middleware: [requireAuth, rateLimits.write()],
   request: {
     body: jsonContentRequired(createBookingSchema, "The booking to create"),
   },
   responses: {
+    [HttpStatusCodes.TOO_MANY_REQUESTS]: jsonContent(
+      tooManyRequestsSchema,
+      "Rate limit exceeded",
+    ),
     [HttpStatusCodes.CREATED]: jsonContent(selectBookingSchema, "The created booking"),
     [HttpStatusCodes.UNAUTHORIZED]: jsonContent(unauthorizedSchema, "Not signed in"),
     [HttpStatusCodes.NOT_FOUND]: jsonContent(notFoundSchema, "Property not found"),
@@ -76,11 +81,15 @@ export const list = createRoute({
   tags,
   summary: "List bookings",
   description: "A guest sees only their own bookings; an admin sees all of them.",
-  middleware: [requireAuth],
+  middleware: [requireAuth, rateLimits.read()],
   request: {
     query: listBookingsQuerySchema,
   },
   responses: {
+    [HttpStatusCodes.TOO_MANY_REQUESTS]: jsonContent(
+      tooManyRequestsSchema,
+      "Rate limit exceeded",
+    ),
     [HttpStatusCodes.OK]: jsonContent(listBookingsResponseSchema, "A page of bookings"),
     [HttpStatusCodes.UNAUTHORIZED]: jsonContent(unauthorizedSchema, "Not signed in"),
     [HttpStatusCodes.UNPROCESSABLE_ENTITY]: jsonContent(
@@ -95,11 +104,15 @@ export const getOne = createRoute({
   method: "get",
   tags,
   summary: "Get one booking",
-  middleware: [requireAuth],
+  middleware: [requireAuth, rateLimits.read()],
   request: {
     params: IdUUIDParamsSchema,
   },
   responses: {
+    [HttpStatusCodes.TOO_MANY_REQUESTS]: jsonContent(
+      tooManyRequestsSchema,
+      "Rate limit exceeded",
+    ),
     [HttpStatusCodes.OK]: jsonContent(selectBookingSchema, "The booking"),
     [HttpStatusCodes.UNAUTHORIZED]: jsonContent(unauthorizedSchema, "Not signed in"),
     [HttpStatusCodes.NOT_FOUND]: jsonContent(notFoundSchema, "Booking not found"),
@@ -118,11 +131,15 @@ export const cancel = createRoute({
   description:
     "Only a booking still in pending_payment may be cancelled, per the "
     + "status lifecycle. Cancelling frees the dates for another guest.",
-  middleware: [requireAuth],
+  middleware: [requireAuth, rateLimits.write()],
   request: {
     params: IdUUIDParamsSchema,
   },
   responses: {
+    [HttpStatusCodes.TOO_MANY_REQUESTS]: jsonContent(
+      tooManyRequestsSchema,
+      "Rate limit exceeded",
+    ),
     [HttpStatusCodes.OK]: jsonContent(selectBookingSchema, "The cancelled booking"),
     [HttpStatusCodes.UNAUTHORIZED]: jsonContent(unauthorizedSchema, "Not signed in"),
     [HttpStatusCodes.FORBIDDEN]: jsonContent(forbiddenSchema, "Not your booking"),
@@ -148,11 +165,15 @@ export const createBlackout = createRoute({
     + "without creating a fake booking. Returns 409 if the range overlaps "
     + "either an existing blackout or a booking that already holds the dates "
     + "— a sold stay can never be silently marked host-blocked.",
-  middleware: [requireAuth, requireRole("admin")],
+  middleware: [requireAuth, requireRole("admin"), rateLimits.write()],
   request: {
     body: jsonContentRequired(createBlackoutSchema, "The blackout to create"),
   },
   responses: {
+    [HttpStatusCodes.TOO_MANY_REQUESTS]: jsonContent(
+      tooManyRequestsSchema,
+      "Rate limit exceeded",
+    ),
     [HttpStatusCodes.CREATED]: jsonContent(
       selectBlackoutSchema,
       "The created blackout",
