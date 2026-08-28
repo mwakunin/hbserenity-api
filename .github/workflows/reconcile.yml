@@ -28,6 +28,18 @@ name: Reconcile payments
 #
 # Prefer that if the API runs on a VPS you control. This workflow exists so
 # scheduling does not depend on having such a host.
+#
+# Two settings are required before it can run at all, and it fails loudly
+# rather than half-working without either:
+#
+#   - secrets.PRODUCTION_ENV       the production env file, verbatim
+#   - vars.RECONCILE_IMAGE_TAG     the sha tag production is running
+#
+# The tag is deliberately not defaulted to `latest`. This sweep decides what
+# settles a payment, so a reconciler on a different build than the deployed
+# API can apply rules the API does not share, and `latest` moves by
+# definition. A failing job is the louder outcome — GitHub mails about it —
+# whereas a sweep against the wrong image looks exactly like a correct one.
 
 on:
   schedule:
@@ -71,16 +83,28 @@ jobs:
       - name: Run the sweep
         env:
           PRODUCTION_ENV: ${{ secrets.PRODUCTION_ENV }}
-          # Pin this to the sha tag production is running, via an Actions
-          # variable. `latest` moves, so it can drift ahead of the deployed
-          # API — harmless for a compare-and-swap sweep, but it means the
-          # reconciler and the API disagree about the rules.
-          IMAGE_TAG: ${{ vars.RECONCILE_IMAGE_TAG || 'latest' }}
+          # Required, with no fallback to `latest`. The sweep decides what
+          # settles a payment, so a reconciler running a build the deployed API
+          # is not can apply rules the API does not share — and `latest` moves
+          # by definition. Refusing to run is the louder failure: GitHub mails
+          # on a failed scheduled workflow, whereas a sweep against the wrong
+          # image looks exactly like a correct one.
+          IMAGE_TAG: ${{ vars.RECONCILE_IMAGE_TAG }}
         run: |
           set -euo pipefail
 
           if [ -z "${PRODUCTION_ENV}" ]; then
             echo "::error::The PRODUCTION_ENV secret is not set. Reconciliation cannot run." >&2
+            exit 1
+          fi
+
+          # Trimmed first: a value pasted into the Actions UI with a stray
+          # space is unset for every practical purpose, and would otherwise
+          # build a malformed image reference instead of failing here.
+          IMAGE_TAG="$(printf '%s' "${IMAGE_TAG}" | tr -d '[:space:]')"
+
+          if [ -z "${IMAGE_TAG}" ]; then
+            echo "::error::The RECONCILE_IMAGE_TAG variable is not set. Set it (Settings -> Secrets and variables -> Actions -> Variables) to the sha tag production is running, e.g. sha-1a2b3c4. Reconciliation will not run against an unpinned image." >&2
             exit 1
           fi
 

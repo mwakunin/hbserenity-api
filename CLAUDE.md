@@ -617,12 +617,17 @@ But scheduled workflows are **disabled automatically after 60 days without
 repository activity**, and a silently stopped reconciler strands money and
 stops stays ever becoming reviewable. If the API runs on a host you control,
 prefer a cron entry or systemd timer there running the same command against
-the same env file; the workflow exists so scheduling does not *require* such
+the same env file; the workflow exists so scheduling does not _require_ such
 a host.
 
-Set the `RECONCILE_IMAGE_TAG` Actions variable to the sha tag production is
-running. It defaults to `latest`, which moves, so the reconciler can otherwise
-drift ahead of the deployed API.
+Two settings are required before the workflow runs at all, and it fails rather
+than half-working without either: the `PRODUCTION_ENV` secret, and the
+`RECONCILE_IMAGE_TAG` Actions variable holding the sha tag production is
+running. The tag is deliberately **not** defaulted to `latest` — the sweep
+decides what settles a payment, so a reconciler on a different build than the
+deployed API can apply rules the API does not share, and `latest` moves by
+definition. A failing job is the louder outcome, since GitHub mails about it;
+a sweep against the wrong image looks exactly like a correct one.
 
 ## Testing
 
