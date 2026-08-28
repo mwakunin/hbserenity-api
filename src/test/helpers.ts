@@ -152,6 +152,31 @@ export async function makeProperty(hostId: string, overrides: PropertyOverrides 
   return row;
 }
 
+/**
+ * Waits until Postgres reports a backend blocked on a lock.
+ *
+ * A fixed sleep only guesses that contention happened and passes whenever the
+ * timer is generous; this asks the database directly. The window sits under
+ * vitest's default test timeout so a missing lock fails as an assertion
+ * rather than an opaque "test timed out".
+ */
+export async function waitForBlockedBackend(timeoutMs = 2500): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const { rows } = await pool.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM pg_stat_activity
+       WHERE wait_event_type = 'Lock' AND state = 'active'`,
+    );
+    if (rows[0].n > 0)
+      return true;
+
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+
+  return false;
+}
+
 /** `offset` days from today as a YYYY-MM-DD string, matching the `date` columns. */
 export function dayFromNow(offset: number) {
   const d = new Date();
