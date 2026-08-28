@@ -58,6 +58,10 @@ const EnvSchema = z.object({
    */
   MPESA_CALLBACK_ALLOWED_IPS: z.string().optional(),
 
+  // --- Google sign-in (optional; enabled only when both are present) ---
+  GOOGLE_CLIENT_ID: z.string().optional(),
+  GOOGLE_CLIENT_SECRET: z.string().optional(),
+
   // --- Email (Resend) ---
   RESEND_API_KEY: z.string().optional(),
 
@@ -76,6 +80,14 @@ const EnvSchema = z.object({
             message: "Must be set when NODE_ENV is 'production'",
           });
         }
+      }
+
+      if (Boolean(input.GOOGLE_CLIENT_ID) !== Boolean(input.GOOGLE_CLIENT_SECRET)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["GOOGLE_CLIENT_SECRET"],
+          message: "Set both GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET, or neither",
+        });
       }
 
       if (input.MPESA_CALLBACK_URL && !input.MPESA_CALLBACK_URL.startsWith("https://")) {

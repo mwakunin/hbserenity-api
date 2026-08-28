@@ -12,6 +12,13 @@ import { boolean, index, pgTable, text, timestamp } from "drizzle-orm/pg-core";
 //  1. `user.role` has `.notNull()` added. The CLI emits a nullable column,
 //     which would force a null-check at every authorization site. The DB
 //     default ("guest") makes notNull safe.
+//  3. `account.issuer` is added by hand — Better Auth >= 1.7 requires it and
+//     the standalone CLI is still on 1.4.x, so regenerating drops it and
+//     every sign-up starts failing with "The field \"issuer\" does not
+//     exist in the \"account\" Drizzle schema".
+//  4. `.defaultNow()` is added to `session.updatedAt` and
+//     `account.updatedAt`. The CLI emits `$onUpdate` alone, which fires on
+//     UPDATE and not INSERT, leaving a NOT NULL column with no default.
 //  2. The CLI also emits `userRelations` / `sessionRelations` /
 //     `accountRelations` at the bottom of the file. They are deleted here and
 //     redefined in schema.ts instead — a second `relations(user, ...)` would
@@ -49,7 +56,11 @@ export const session = pgTable(
     expiresAt: timestamp("expires_at").notNull(),
     token: text("token").notNull().unique(),
     createdAt: timestamp("created_at").defaultNow().notNull(),
+    // Deviation 4: `.defaultNow()` added. The CLI emits $onUpdate only, which
+    // fires on UPDATE and not INSERT, leaving a NOT NULL column with no
+    // default that any direct insert trips over.
     updatedAt: timestamp("updated_at")
+      .defaultNow()
       .$onUpdate(() => new Date())
       .notNull(),
     ipAddress: text("ip_address"),
@@ -67,6 +78,12 @@ export const account = pgTable(
     id: text("id").primaryKey(),
     accountId: text("account_id").notNull(),
     providerId: text("provider_id").notNull(),
+    // Deviation 3: required by Better Auth >= 1.7, which scopes account
+    // identity by issuer. The standalone CLI is pinned at 1.4.x and does not
+    // emit it, so it will be missing again after any regeneration.
+    // Values are synthetic: `local:credential` for password accounts,
+    // `local:oauth:<provider>` for social ones.
+    issuer: text("issuer").notNull(),
     userId: text("user_id")
       .notNull()
       .references(() => user.id, { onDelete: "cascade" }),
@@ -78,7 +95,9 @@ export const account = pgTable(
     scope: text("scope"),
     password: text("password"),
     createdAt: timestamp("created_at").defaultNow().notNull(),
+    // Deviation 4, as on `session` above.
     updatedAt: timestamp("updated_at")
+      .defaultNow()
       .$onUpdate(() => new Date())
       .notNull(),
   },

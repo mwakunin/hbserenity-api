@@ -1,11 +1,15 @@
 import { createRoute, z } from "@hono/zod-openapi";
+import { eq } from "drizzle-orm";
 import * as HttpStatusCodes from "stoker/http-status-codes";
 import { jsonContent } from "stoker/openapi/helpers";
 import { beforeEach, describe, expect, it } from "vitest";
 
+import db from "@/db";
+import { user } from "@/db/schema";
+import { activeAuthMethods, googleEnabled, phoneOtpEnabled } from "@/lib/auth";
 import { forbiddenSchema, unauthorizedSchema } from "@/lib/constants";
 import { createRouter, createTestApp } from "@/lib/create-app";
-import { nextPhone, resetDb, signIn } from "@/test/helpers";
+import { nextEmail, nextPhone, resetDb, signIn, signUpWithEmail } from "@/test/helpers";
 
 import { requireAuth, requireRole } from "./auth";
 
@@ -84,5 +88,98 @@ describe("auth middleware", () => {
   it("returns 401 (not 403) on a role-gated route when unauthenticated", async () => {
     const res = await app.request("/admin-only");
     expect(res.status).toBe(401);
+  });
+});
+
+describe("sign-in methods available while SMS is deferred", () => {
+  beforeEach(async () => {
+    await resetDb();
+  });
+
+  it("lets a guest sign up with email and password", async () => {
+    const guest = await signUpWithEmail(nextEmail());
+
+    const res = await app.request("/whoami", { headers: guest.headers });
+    expect(res.status).toBe(200);
+    expect((await res.json()).role).toBe("guest");
+  });
+
+  it("rejects a weak password", async () => {
+    const res = await app.request("/api/auth/sign-up/email", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        email: nextEmail(),
+        password: "short",
+        name: "Test",
+      }),
+    });
+    expect(res.ok).toBe(false);
+  });
+
+  it("signs an existing user back in", async () => {
+    const email = nextEmail();
+    await signUpWithEmail(email, "correct-horse-battery");
+
+    const res = await app.request("/api/auth/sign-in/email", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, password: "correct-horse-battery" }),
+    });
+    expect(res.ok).toBe(true);
+  });
+
+  it("rejects a wrong password", async () => {
+    const email = nextEmail();
+    await signUpWithEmail(email, "correct-horse-battery");
+
+    const res = await app.request("/api/auth/sign-in/email", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, password: "wrong-password-entirely" }),
+    });
+    expect(res.ok).toBe(false);
+  });
+
+  it("cannot self-assign a role at sign-up", async () => {
+    const email = nextEmail();
+    const res = await app.request("/api/auth/sign-up/email", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        email,
+        password: "correct-horse-battery",
+        name: "Sneaky",
+        role: "admin",
+      }),
+    });
+    expect(res.ok).toBe(true);
+
+    const [row] = await db.select().from(user).where(eq(user.email, email));
+    expect(row.role).toBe("guest");
+  });
+
+  it("keeps phone OTP working, so it can be switched on without code changes", async () => {
+    const guest = await signIn(nextPhone());
+    const res = await app.request("/whoami", { headers: guest.headers });
+    expect(res.status).toBe(200);
+  });
+
+  it("reports email+password as an active method and phone OTP as dormant", () => {
+    expect(activeAuthMethods).toContain("email_password");
+    expect(phoneOtpEnabled).toBe(false);
+    expect(activeAuthMethods).not.toContain("phone_otp");
+  });
+
+  it("does not advertise Google when credentials are absent", async () => {
+    // .env.test sets no Google credentials.
+    expect(googleEnabled).toBe(false);
+
+    const res = await app.request("/api/auth/sign-in/social", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ provider: "google", callbackURL: "/" }),
+    });
+    expect(res.ok).toBe(false);
   });
 });

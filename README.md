@@ -9,7 +9,9 @@ guests.
 > see [CLAUDE.md](./CLAUDE.md) for the full list.
 
 Built on [Hono](https://hono.dev/) with `@hono/zod-openapi`, Drizzle ORM
-against Postgres, and Better Auth for phone+OTP sign-in. Interactive API docs
+against Postgres, and Better Auth. Sign-in is email+password, with Google
+available when credentials are configured; phone+OTP is implemented but
+dormant until an SMS provider is wired. Interactive API docs
 are served by [Scalar](https://scalar.com/).
 
 ## Setup

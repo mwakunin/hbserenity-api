@@ -15,27 +15,47 @@ import { normalizeKenyanPhone } from "./phone";
  */
 export const sentOtps = new Map<string, string>();
 
+/** Google sign-in needs both halves of the credential pair, or neither. */
+export const googleEnabled = Boolean(
+  env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET,
+);
+
 /**
- * Phone + OTP is the ONLY way to sign in, so an unconfigured SMS provider
- * means nobody can authenticate at all. Refuse to start rather than boot a
- * deployment whose login is silently broken — a failed deploy is visible,
- * whereas "guests cannot sign in" surfaces only once real users hit it.
- *
- * Wiring a provider (Africa's Talking is the usual choice in Kenya) means
- * adding its credentials to env.ts and sending the message in sendOTP below.
+ * Phone OTP is fully implemented but cannot deliver a code until an SMS
+ * provider is wired in `sendOTP` below. It stays dormant rather than removed:
+ * the plugin, its columns and its endpoints are all in place, so enabling it
+ * later is a credentials change, not a code change.
  */
-if (env.NODE_ENV === "production") {
+export const phoneOtpEnabled = false;
+
+/**
+ * Sign-in methods that actually work right now.
+ *
+ * Email+password always does — it has no external dependency — which is what
+ * lets the API boot while SMS is deferred. The check is kept anyway: if
+ * someone later disables it without enabling another method, a deployment
+ * whose login is silently broken should fail loudly rather than serve traffic
+ * nobody can sign in to.
+ */
+export const activeAuthMethods = [
+  "email_password",
+  ...(googleEnabled ? ["google" as const] : []),
+  ...(phoneOtpEnabled ? ["phone_otp" as const] : []),
+];
+
+if (activeAuthMethods.length === 0) {
   throw new Error(
-    "No SMS provider is configured, so phone OTP sign-in cannot work. "
-    + "Wire one up in src/lib/auth.ts (sendOTP) and add its credentials to "
-    + "src/env.ts before deploying to production.",
+    "No sign-in method is usable, so nobody could authenticate. Enable "
+    + "email+password, configure Google, or wire an SMS provider for phone OTP.",
   );
 }
 
 /**
- * Phone + OTP is the primary login method, not email/password — it matches how
- * Kenyan guests actually identify themselves, and the verified number is the
- * same one M-Pesa will charge.
+ * Email+password is the working method today; Google is enabled when
+ * credentials are present; phone+OTP is kept for when the client wants it.
+ *
+ * Phone remains the right primary for Kenyan guests — the verified number is
+ * the one M-Pesa charges — so none of that code has been removed.
  */
 export const auth = betterAuth({
   secret: env.BETTER_AUTH_SECRET,
@@ -46,8 +66,27 @@ export const auth = betterAuth({
     schema: authSchema,
   }),
 
-  // Disabled deliberately: there is no password flow.
-  emailAndPassword: { enabled: false },
+  emailAndPassword: {
+    enabled: true,
+    // No transactional email provider is wired yet (Resend is configured but
+    // unused), so requiring verification would lock every new account out.
+    // Turn this on in the same change that sends the verification mail.
+    requireEmailVerification: false,
+    minPasswordLength: 10,
+  },
+
+  // Only registered when both credentials are present — Better Auth would
+  // otherwise advertise a provider that cannot complete a round trip.
+  ...(googleEnabled
+    ? {
+        socialProviders: {
+          google: {
+            clientId: env.GOOGLE_CLIENT_ID!,
+            clientSecret: env.GOOGLE_CLIENT_SECRET!,
+          },
+        },
+      }
+    : {}),
 
   user: {
     additionalFields: {
@@ -74,9 +113,17 @@ export const auth = betterAuth({
           return;
         }
 
-        // Production never reaches here: the startup guard above stops the
-        // process before any request is served. Replace that guard and this
-        // line together when an SMS provider is wired in.
+        // Dormant in production until an SMS provider is wired: fail loudly
+        // rather than silently not delivering a code. Replace this line and
+        // flip phoneOtpEnabled together when that happens.
+        if (env.NODE_ENV === "production") {
+          throw new Error(
+            "Phone OTP is not available: no SMS provider is configured. "
+            + "Wire one up in src/lib/auth.ts (sendOTP), add its credentials "
+            + "to src/env.ts, and set phoneOtpEnabled.",
+          );
+        }
+
         console.warn(`[dev] OTP for ${normalized}: ${code}`);
       },
 
