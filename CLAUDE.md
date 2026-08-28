@@ -420,6 +420,16 @@ See `.env.example` at the repo root for the full template.
   and that `/health` reports the database as down when it is. A built image
   that cannot start is not a passing build.
 
+  On merges to `main` only, it then pushes to GHCR as `:latest` and
+  `:sha-<commit>`. Publishing happens **after** the smoke test, so a broken
+  image never reaches the registry, and never on pull requests — a PR should
+  prove the image builds, not publish one (a fork's token cannot write
+  packages regardless). Auth is `GITHUB_TOKEN` with `packages: write`; no
+  separate secret to manage or rotate.
+
+  Deploy the sha tag rather than `latest`: `latest` moves, so it is not
+  something you can roll back to.
+
 Deployment migrations use `pnpm db:migrate:deploy`, which calls drizzle-orm's
 own migrator (`src/db/migrate.ts`) rather than `drizzle-kit`. drizzle-kit is a
 devDependency and does not exist in a `--prod` image; drizzle-orm is already a

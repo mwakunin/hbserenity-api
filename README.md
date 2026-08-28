@@ -118,6 +118,26 @@ regeneration procedure, and what is deliberately not built yet.
 
 ## Deploying
 
+Every merge to `main` publishes the image to GHCR — but only after the smoke
+test passes, so a broken image never reaches the registry:
+
+```
+ghcr.io/mwakunin/hbserenity-api:latest
+ghcr.io/mwakunin/hbserenity-api:sha-<commit>
+```
+
+Deploy the **sha tag**, not `latest` — `latest` moves, so it can't be rolled
+back to. Packages are private by default; make the package public in its
+GitHub settings, or log in to pull:
+
+```sh
+docker pull ghcr.io/mwakunin/hbserenity-api:sha-abc1234
+docker run -p 9999:9999 --env-file .env.production \
+  ghcr.io/mwakunin/hbserenity-api:sha-abc1234
+```
+
+To build it yourself:
+
 ```sh
 docker build -t rentals-api .
 ```
