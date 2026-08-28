@@ -22,19 +22,43 @@ export interface ClientIpSources {
 }
 
 /**
+ * Addresses permitted to have written the forwarding chain.
+ *
+ * `TRUST_PROXY_HOPS` alone assumes every request arrived through your proxy.
+ * If the app is ALSO reachable directly, an attacker connects straight to it,
+ * sends a chain of their own, and the entry we read from the right is theirs —
+ * the bypass returns. Restricting the peer closes that, so the header is only
+ * believed when it demonstrably came through the expected edge.
+ *
+ * Empty means "no peer restriction", which is only safe when the network
+ * makes direct access impossible.
+ */
+export type TrustedProxies = ReadonlySet<string>;
+
+/**
  * @param sources The socket address and any forwarding headers on the request.
  * @param trustedHops How many proxies of your own sit in front of the app.
  *   0 means the app is exposed directly and headers are ignored. 1 means a
  *   single load balancer, and so on. Setting this higher than the real number
  *   lets a client push a forged value into the position we read.
+ * @param trustedProxies Addresses allowed to have written that chain. Empty
+ *   means any peer is believed, which is only safe if nothing can reach the
+ *   app except through your proxy.
  */
 export function resolveClientIp(
   sources: ClientIpSources,
   trustedHops: number,
+  trustedProxies: TrustedProxies = new Set(),
 ): string | undefined {
   const socket = sources.socketAddress?.trim() || undefined;
 
   if (trustedHops <= 0)
+    return socket;
+
+  // A chain is only as trustworthy as whoever handed it to us. When an
+  // allowlist is configured, a request that did not arrive through it is
+  // treated as if it carried no chain at all.
+  if (trustedProxies.size > 0 && (!socket || !trustedProxies.has(socket)))
     return socket;
 
   const chain = sources.xForwardedFor

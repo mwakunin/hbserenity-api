@@ -100,6 +100,11 @@ from the right of the chain — otherwise anyone could rotate the header for a
 fresh limit. **Set `TRUST_PROXY_HOPS` to your real hop count when deploying
 behind a load balancer**, or client addresses will all look like the balancer.
 
+That setting assumes every request arrives through that balancer. If the app
+is also reachable directly, either bind it so it isn't, or list the balancer
+in `TRUSTED_PROXY_IPS` — otherwise someone can connect straight to it and
+supply their own forwarding chain.
+
 If Redis is unreachable the limiter fails open and logs — a cache outage
 should not be a total outage. `POST /mpesa/callback` and `GET /health` are
 exempt.

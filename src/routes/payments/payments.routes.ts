@@ -83,11 +83,15 @@ export const listForBooking = createRoute({
   description:
     "Every STK push attempt, newest first. Retries are separate rows, so this "
     + "is the full audit trail rather than just the current state.",
-  middleware: [requireAuth],
+  middleware: [requireAuth, rateLimits.read()],
   request: {
     params: IdUUIDParamsSchema,
   },
   responses: {
+    [HttpStatusCodes.TOO_MANY_REQUESTS]: jsonContent(
+      tooManyRequestsSchema,
+      "Rate limit exceeded",
+    ),
     [HttpStatusCodes.OK]: jsonContent(listPaymentsResponseSchema, "The attempts"),
     [HttpStatusCodes.UNAUTHORIZED]: jsonContent(unauthorizedSchema, "Not signed in"),
     [HttpStatusCodes.NOT_FOUND]: jsonContent(notFoundSchema, "Booking not found"),

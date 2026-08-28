@@ -76,6 +76,46 @@ describe("resolveClientIp", () => {
     });
   });
 
+  describe("with a trusted proxy allowlist", () => {
+    const allow = new Set(["10.0.0.1"]);
+
+    it("believes the chain when it came through an allowed proxy", () => {
+      expect(resolveClientIp({
+        socketAddress: "10.0.0.1",
+        xForwardedFor: "203.0.113.9",
+      }, 1, allow)).toBe("203.0.113.9");
+    });
+
+    // The attack the allowlist exists for: reaching the app directly and
+    // supplying a chain of your own.
+    it("ignores the chain from a peer that is not the proxy", () => {
+      expect(resolveClientIp({
+        socketAddress: "198.51.100.66",
+        xForwardedFor: "spoofed",
+      }, 1, allow)).toBe("198.51.100.66");
+    });
+
+    it("gives a direct attacker one identity however they rotate the chain", () => {
+      const seen = new Set(["a", "b, c", "d, e, f"].map(xff =>
+        resolveClientIp({ socketAddress: "198.51.100.66", xForwardedFor: xff }, 1, allow)));
+
+      expect(seen).toEqual(new Set(["198.51.100.66"]));
+    });
+
+    it("ignores the chain when there is no socket address to check", () => {
+      expect(resolveClientIp({ xForwardedFor: "spoofed" }, 1, allow)).toBeUndefined();
+    });
+
+    it("believes any peer when the allowlist is empty", () => {
+      // The documented default: safe only when nothing can reach the app
+      // except through the proxy.
+      expect(resolveClientIp({
+        socketAddress: "198.51.100.66",
+        xForwardedFor: "203.0.113.9",
+      }, 1, new Set())).toBe("203.0.113.9");
+    });
+  });
+
   describe("fallbacks", () => {
     it("falls back to the socket when the chain is shorter than the hop count", () => {
       // Misconfiguration, or a request that skipped a proxy. The socket

@@ -51,6 +51,11 @@ function isRateLimiterRes(err: unknown): err is RateLimiterRes {
  * unidentifiable caller being limited alongside others is safer than not
  * being limited.
  */
+/** Parsed once: the allowlist cannot change without a restart. */
+const trustedProxies = new Set(
+  env.TRUSTED_PROXY_IPS?.split(",").map(ip => ip.trim()).filter(Boolean) ?? [],
+);
+
 function anonymousKey(c: Context<AppBindings>): string {
   let socketAddress: string | undefined;
   try {
@@ -66,6 +71,7 @@ function anonymousKey(c: Context<AppBindings>): string {
       xForwardedFor: c.req.header("x-forwarded-for"),
     },
     env.TRUST_PROXY_HOPS,
+    trustedProxies,
   ) ?? "unknown";
 }
 
