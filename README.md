@@ -5,13 +5,14 @@ guests.
 
 > **Status:** booking and M-Pesa payment are complete and tested against a
 > mocked Safaricom. Add your Daraja credentials to `.env` to run it for real.
-> Not yet built: refunds, email, and photo uploads —
+> Not yet built: refunds, booking-confirmation email, and photo uploads —
 > see [CLAUDE.md](./CLAUDE.md) for the full list.
 
 Built on [Hono](https://hono.dev/) with `@hono/zod-openapi`, Drizzle ORM
 against Postgres, and Better Auth. Sign-in is email+password, with Google
 available when credentials are configured; phone+OTP is implemented but
-dormant until an SMS provider is wired. Interactive API docs
+dormant until an SMS provider is wired. Verification email is sent via Resend
+when configured. Interactive API docs
 are served by [Scalar](https://scalar.com/).
 
 ## Setup

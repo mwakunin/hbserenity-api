@@ -298,8 +298,10 @@ Non-default dev ports are deliberate: another project on this machine binds
   `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` are set. **Phone+OTP is fully
   implemented but dormant** — the plugin, columns and endpoints are all in
   place, and `sendOTP` throws in production until an SMS provider is wired.
-  Enabling it is a credentials change plus flipping `phoneOtpEnabled`, not a
-  code change. Phone remains the right primary for Kenyan guests (the verified
+  Enabling it means three things, not one: implement the send in `sendOTP`
+  (it currently throws), add the provider's credentials to `env.ts`, and set
+  `phoneOtpEnabled`. Everything around it — plugin, columns, endpoints, the
+  OTP verification flow — is already there. Phone remains the right primary for Kenyan guests (the verified
   number is the one M-Pesa charges), so none of it was removed.
 
   `activeAuthMethods` refuses to start if _no_ method is usable. Email+password

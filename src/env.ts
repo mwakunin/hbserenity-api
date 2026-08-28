@@ -85,22 +85,6 @@ const EnvSchema = z.object({
         }
       }
 
-      if (Boolean(input.RESEND_API_KEY) !== Boolean(input.RESEND_FROM_EMAIL)) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["RESEND_FROM_EMAIL"],
-          message: "Set both RESEND_API_KEY and RESEND_FROM_EMAIL, or neither",
-        });
-      }
-
-      if (Boolean(input.GOOGLE_CLIENT_ID) !== Boolean(input.GOOGLE_CLIENT_SECRET)) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["GOOGLE_CLIENT_SECRET"],
-          message: "Set both GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET, or neither",
-        });
-      }
-
       if (input.MPESA_CALLBACK_URL && !input.MPESA_CALLBACK_URL.startsWith("https://")) {
         ctx.addIssue({
           code: "custom",
@@ -108,6 +92,26 @@ const EnvSchema = z.object({
           message: "Must be a publicly reachable HTTPS URL",
         });
       }
+    }
+
+    // Paired credentials are checked in every environment, not just
+    // production. Half a pair silently disables the feature — Google simply
+    // isn't offered, email verification quietly isn't required — which is
+    // precisely the failure you'd waste time debugging locally.
+    if (Boolean(input.RESEND_API_KEY) !== Boolean(input.RESEND_FROM_EMAIL)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["RESEND_FROM_EMAIL"],
+        message: "Set both RESEND_API_KEY and RESEND_FROM_EMAIL, or neither",
+      });
+    }
+
+    if (Boolean(input.GOOGLE_CLIENT_ID) !== Boolean(input.GOOGLE_CLIENT_SECRET)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["GOOGLE_CLIENT_SECRET"],
+        message: "Set both GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET, or neither",
+      });
     }
 
     // Guard against a stray `pnpm test` running against — and truncating —
