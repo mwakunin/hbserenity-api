@@ -349,6 +349,29 @@ Non-default dev ports are deliberate: another project on this machine binds
   snapshots at booking time, so a rate changed in between legitimately yields
   a different total. Don't document it as a held price.
 
+- **Refunds are records, not transfers.** Only a `success` payment can be
+  refunded — you cannot return money never taken. Partial refunds are
+  allowed, and the total can never exceed the payment.
+
+  That rule spans rows, so no CHECK can express it: it is enforced by a
+  `FOR UPDATE` lock on the payment in `recordRefund()`. The foreign key alone
+  is not enough — it takes KEY SHARE, which does not conflict with itself, so
+  two concurrent refunds would each read the same total and both insert.
+  There is a test that exercises that distinction on two connections, because
+  neither an in-process concurrency test nor a lock-observation test can tell
+  the two apart.
+
+  A fully refunded payment stops appearing in
+  `GET /admin/payments/attention`, or every handled case would sit there
+  forever and the list would stop being worth reading.
+
+  **`mpesaReference` is required**, and that is load-bearing rather than
+  tidiness. Recording a refund clears the payment from the attention list, so
+  a record without proof the money moved would let an _intention_ to refund
+  erase a real debt — the failure mode the list exists to prevent. The column
+  is NOT NULL as well as required in the request schema: the schema gives a
+  readable 422, the constraint is the backstop.
+
 - **Never trust a client-sent price.** `bookings.totalAmountCents` is always
   computed by `calculateBookingTotal()` in `src/lib/pricing.ts`, the single
   source of truth for what a stay costs.

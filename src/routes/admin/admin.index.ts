@@ -5,6 +5,8 @@ import * as routes from "./admin.routes";
 
 const router = createRouter()
   .openapi(routes.reconcile, handlers.reconcile)
+  .openapi(routes.recordRefund, handlers.recordRefund)
+  .openapi(routes.listRefunds, handlers.listRefunds)
   .openapi(routes.attention, handlers.attention);
 
 export default router;

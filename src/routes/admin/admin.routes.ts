@@ -1,8 +1,15 @@
 import { createRoute, z } from "@hono/zod-openapi";
 import * as HttpStatusCodes from "stoker/http-status-codes";
-import { jsonContent } from "stoker/openapi/helpers";
+import { jsonContent, jsonContentRequired } from "stoker/openapi/helpers";
+import { createErrorSchema, IdUUIDParamsSchema } from "stoker/openapi/schemas";
 
-import { forbiddenSchema, unauthorizedSchema } from "@/lib/constants";
+import {
+  conflictSchema,
+  forbiddenSchema,
+  notFoundSchema,
+  tooManyRequestsSchema,
+  unauthorizedSchema,
+} from "@/lib/constants";
 import { requireAuth, requireRole } from "@/middlewares/auth";
 
 const tags = ["Admin"];
@@ -54,6 +61,90 @@ export const reconcile = createRoute({
   },
 });
 
+export const recordRefundSchema = z.object({
+  amountCents: z.number().int().positive().refine(
+    n => n % 100 === 0,
+    "Amount must be a whole number of shillings (divisible by 100)",
+  ),
+  reason: z.string().trim().min(1).max(500).openapi({ example: "Guest cancelled after payment" }),
+  /**
+   * The transaction that carried the money back — required. Recording a
+   * refund removes the payment from the attention list, so without proof the
+   * money moved, an intention would silently clear a real debt.
+   */
+  mpesaReference: z.string().trim().min(1).max(64).openapi({ example: "SDJ4H2K1LM" }),
+});
+
+export const refundResponseSchema = z.object({
+  id: z.string(),
+  paymentId: z.string(),
+  amountCents: z.number().int(),
+  reason: z.string(),
+  mpesaReference: z.string(),
+  createdAt: z.date(),
+});
+
+export const listRefundsResponseSchema = z.object({
+  data: z.array(refundResponseSchema),
+  paymentCents: z.number().int(),
+  refundedCents: z.number().int(),
+  outstandingCents: z.number().int(),
+});
+
+export const recordRefund = createRoute({
+  path: "/admin/payments/{id}/refunds",
+  method: "post",
+  tags,
+  summary: "Record money returned to a guest",
+  description:
+    "Records a refund; it does NOT move money. Safaricom's Reversal API is a "
+    + "separate product this system has no credentials for, so send the money "
+    + "yourself and record its reference here — the reference is required, "
+    + "because recording a refund clears the payment from the attention list "
+    + "and an unbacked record would hide money that never moved. Partial "
+    + "refunds are allowed, "
+    + "and the total can never exceed what the guest paid. Once a payment is "
+    + "fully refunded it stops appearing in the attention list.",
+  middleware: adminOnly(),
+  request: {
+    params: IdUUIDParamsSchema,
+    body: jsonContentRequired(recordRefundSchema, "The refund"),
+  },
+  responses: {
+    [HttpStatusCodes.TOO_MANY_REQUESTS]: jsonContent(tooManyRequestsSchema, "Rate limit exceeded"),
+    [HttpStatusCodes.CREATED]: jsonContent(refundResponseSchema, "The recorded refund"),
+    [HttpStatusCodes.UNAUTHORIZED]: jsonContent(unauthorizedSchema, "Not signed in"),
+    [HttpStatusCodes.FORBIDDEN]: jsonContent(forbiddenSchema, "Not an admin"),
+    [HttpStatusCodes.NOT_FOUND]: jsonContent(notFoundSchema, "Payment not found"),
+    [HttpStatusCodes.CONFLICT]: jsonContent(
+      conflictSchema,
+      "The payment did not succeed, or this would refund more than was paid",
+    ),
+    [HttpStatusCodes.UNPROCESSABLE_ENTITY]: jsonContent(
+      createErrorSchema(recordRefundSchema),
+      "The validation error(s)",
+    ),
+  },
+});
+
+export const listRefunds = createRoute({
+  path: "/admin/payments/{id}/refunds",
+  method: "get",
+  tags,
+  summary: "Refunds recorded against a payment",
+  middleware: adminOnly(),
+  request: {
+    params: IdUUIDParamsSchema,
+  },
+  responses: {
+    [HttpStatusCodes.TOO_MANY_REQUESTS]: jsonContent(tooManyRequestsSchema, "Rate limit exceeded"),
+    [HttpStatusCodes.OK]: jsonContent(listRefundsResponseSchema, "The refunds"),
+    [HttpStatusCodes.UNAUTHORIZED]: jsonContent(unauthorizedSchema, "Not signed in"),
+    [HttpStatusCodes.FORBIDDEN]: jsonContent(forbiddenSchema, "Not an admin"),
+    [HttpStatusCodes.NOT_FOUND]: jsonContent(notFoundSchema, "Payment not found"),
+  },
+});
+
 export const attention = createRoute({
   path: "/admin/payments/attention",
   method: "get",
@@ -73,4 +164,6 @@ export const attention = createRoute({
 });
 
 export type ReconcileRoute = typeof reconcile;
+export type RecordRefundRoute = typeof recordRefund;
+export type ListRefundsRoute = typeof listRefunds;
 export type AttentionRoute = typeof attention;

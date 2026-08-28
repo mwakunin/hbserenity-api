@@ -372,6 +372,57 @@ export const payments = pgTable(
 );
 
 // ---------------------------------------------------------------------------
+// Refunds — money returned to a guest.
+//
+// A record of what was sent back, not a mechanism for sending it: Safaricom's
+// Reversal API is a separate product needing credentials this system does not
+// hold. The money moves by hand; this is what stops the system losing track
+// of what it owes.
+// ---------------------------------------------------------------------------
+
+export const refunds = pgTable(
+  "refunds",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    // restrict, not cascade: deleting a payment must never silently erase
+    // the record that money was returned for it.
+    paymentId: uuid("payment_id")
+      .notNull()
+      .references(() => payments.id, { onDelete: "restrict" }),
+    amountCents: integer("amount_cents").notNull(),
+    /** Why the money went back — refund reviews are read by humans. */
+    reason: text("reason").notNull(),
+    /**
+     * The transaction that carried the money back. Required, because it is
+     * the only thing separating a refund that happened from an intention to
+     * make one — and a recorded refund clears the payment from the attention
+     * list, so an unbacked record would hide money that was never returned.
+     */
+    mpesaReference: text("mpesa_reference").notNull(),
+    /** The admin who recorded it, so the trail names a person. */
+    issuedBy: text("issued_by")
+      .notNull()
+      .references(() => user.id, { onDelete: "restrict" }),
+    createdAt: createdAt(),
+  },
+  table => [
+    index("refunds_payment_idx").on(table.paymentId),
+    check("refunds_amount_positive", sql`${table.amountCents} > 0`),
+    check("refunds_amount_whole", sql`${table.amountCents} % 100 = 0`),
+    // NOT NULL alone lets '' and '   ' through, which is the same hazard by
+    // another door: a blank reference is not proof the money moved, yet it
+    // would still clear the payment from the attention list. The Zod schema
+    // trims and rejects blanks for a readable 422; this is the backstop for
+    // anything that bypasses it — a seed script, a manual insert, a future
+    // code path.
+    check("refunds_reference_not_blank", sql`length(trim(${table.mpesaReference})) > 0`),
+    // The rule that total refunds never exceed the payment spans rows, so no
+    // CHECK can express it. Enforced in the handler under a lock on the
+    // payment row — see recordRefund().
+  ],
+);
+
+// ---------------------------------------------------------------------------
 // Reviews — tied to a completed booking, not just a property, so only
 // guests who actually stayed can review.
 // ---------------------------------------------------------------------------
@@ -481,11 +532,20 @@ export const bookingsRelations = relations(bookings, ({ one, many }) => ({
   review: one(reviews),
 }));
 
-export const paymentsRelations = relations(payments, ({ one }) => ({
+export const paymentsRelations = relations(payments, ({ one, many }) => ({
   booking: one(bookings, {
     fields: [payments.bookingId],
     references: [bookings.id],
   }),
+  refunds: many(refunds),
+}));
+
+export const refundsRelations = relations(refunds, ({ one }) => ({
+  payment: one(payments, {
+    fields: [refunds.paymentId],
+    references: [payments.id],
+  }),
+  issuer: one(user, { fields: [refunds.issuedBy], references: [user.id] }),
 }));
 
 export const reviewsRelations = relations(reviews, ({ one }) => ({

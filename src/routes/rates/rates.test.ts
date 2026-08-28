@@ -4,41 +4,14 @@ import { beforeEach, describe, expect, it } from "vitest";
 import type { TestUser } from "@/test/helpers";
 
 import app from "@/app";
-import db, { pool } from "@/db";
+import db from "@/db";
 import { properties } from "@/db/schema";
-import { makeProperty, nextPhone, resetDb, signIn } from "@/test/helpers";
+import { backendPid, makeProperty, nextPhone, resetDb, signIn, waitForBlockedBackend } from "@/test/helpers";
 
 /** Fixed dates so weekday arithmetic is stable: 10th is a Thursday. */
 const THU = "2026-09-10";
 const FRI = "2026-09-11";
 const SUN = "2026-09-13";
-
-/**
- * Waits until Postgres reports a backend blocked on a lock.
- *
- * A fixed sleep only guesses that contention happened; this asks the database
- * directly, so the test is deterministic and fails if nothing ever blocks
- * rather than passing because the timer was generous.
- *
- * The window is kept under vitest's default test timeout so a missing lock
- * surfaces as a failed assertion rather than an opaque "test timed out".
- */
-async function waitForBlockedBackend(timeoutMs = 2500): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-
-  while (Date.now() < deadline) {
-    const { rows } = await pool.query<{ n: number }>(
-      `SELECT count(*)::int AS n FROM pg_stat_activity
-       WHERE wait_event_type = 'Lock' AND state = 'active'`,
-    );
-    if (rows[0].n > 0)
-      return true;
-
-    await new Promise(resolve => setTimeout(resolve, 20));
-  }
-
-  return false;
-}
 
 describe("seasonal rates", () => {
   let admin: TestUser;
@@ -294,6 +267,8 @@ describe("seasonal rates", () => {
           .where(eq(properties.id, propertyId))
           .for("update");
 
+        const holder = await backendPid(tx);
+
         writer = createOverride(admin, {
           startDate: THU,
           endDate: SUN,
@@ -303,7 +278,7 @@ describe("seasonal rates", () => {
           return r;
         });
 
-        expect(await waitForBlockedBackend()).toBe(true);
+        expect(await waitForBlockedBackend(holder)).toBe(true);
         finishedWhileLocked = finished;
       });
 
@@ -335,6 +310,8 @@ describe("seasonal rates", () => {
           .where(eq(properties.id, propertyId))
           .for("update");
 
+        const holder = await backendPid(tx);
+
         remover = Promise.resolve(app.request(`/rate-overrides/${id}`, {
           method: "DELETE",
           headers: admin.headers,
@@ -343,7 +320,7 @@ describe("seasonal rates", () => {
           return r;
         });
 
-        expect(await waitForBlockedBackend()).toBe(true);
+        expect(await waitForBlockedBackend(holder)).toBe(true);
         finishedWhileLocked = finished;
       });
 

@@ -5,7 +5,8 @@ guests.
 
 > **Status:** booking and M-Pesa payment are complete and tested against a
 > mocked Safaricom. Add your Daraja credentials to `.env` to run it for real.
-> Not yet built: refunds, booking-confirmation email, and photo uploads —
+> Not yet built: automatic refund transfers, booking-confirmation email, and
+> photo uploads —
 > see [CLAUDE.md](./CLAUDE.md) for the full list.
 
 Built on [Hono](https://hono.dev/) with `@hono/zod-openapi`, Drizzle ORM

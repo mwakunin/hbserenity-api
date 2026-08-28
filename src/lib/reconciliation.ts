@@ -4,6 +4,7 @@ import db from "@/db";
 import { bookings, payments } from "@/db/schema";
 
 import { RESOLVABLE_STATUSES, settleAttemptFromProvider } from "./payment-settlement";
+import { fullyRefunded } from "./refunds";
 
 /**
  * The payment flow deliberately fails closed: whenever it cannot prove what
@@ -134,8 +135,9 @@ export async function paymentsNeedingAttention(): Promise<AttentionItem[]> {
       (${payments.status} = 'pending'
         AND ${payments.pushDispatchedAt} IS NOT NULL
         AND ${payments.checkoutRequestId} IS NULL)
-      OR ${payments.resultDesc} ILIKE ${DUPLICATE_FLAG}
-      OR (${payments.status} = 'success' AND ${bookings.status} = 'cancelled')
+      OR (${payments.resultDesc} ILIKE ${DUPLICATE_FLAG} AND NOT (${fullyRefunded}))
+      OR (${payments.status} = 'success' AND ${bookings.status} = 'cancelled'
+        AND NOT (${fullyRefunded}))
       OR (${payments.status} IN ('pending', 'timeout')
         AND ${payments.createdAt} < ${stuckBefore})
     `)
