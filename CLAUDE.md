@@ -321,6 +321,23 @@ Non-default dev ports are deliberate: another project on this machine binds
   errors drizzle actually throws, since a change in how drizzle wraps errors
   would silently turn every mapped 409/422 back into a 500.
 
+- **Nightly price resolves in one place**, `nightlyRate()` in
+  `lib/pricing.ts`, with a deliberate precedence: a `property_rate_overrides`
+  row for the date wins, then the property's optional Friday/Saturday
+  `weekendPriceCents`, then the base rate. An explicit season must beat a
+  recurring rule, or a Christmas price would be undercut whenever the date
+  landed on a Friday.
+
+  Overrides are half-open like everything else, and cannot overlap —
+  `property_rate_overrides_no_overlap` is an EXCLUDE constraint, because a
+  night with two prices has no defined answer and a pre-check cannot stop two
+  concurrent inserts.
+
+  The booking reads overrides **inside the same transaction, under the
+  property lock**, so a snapshot cannot be taken against rates that changed
+  midway. `GET /properties/{id}/quote` runs the identical calculation, which
+  is what lets a quote and the eventual charge agree.
+
 - **Never trust a client-sent price.** `bookings.totalAmountCents` is always
   computed by `calculateBookingTotal()` in `src/lib/pricing.ts`, the single
   source of truth for what a stay costs.

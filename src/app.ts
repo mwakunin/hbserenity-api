@@ -6,6 +6,7 @@ import health from "@/routes/health.route";
 import index from "@/routes/index.route";
 import payments from "@/routes/payments/payments.index";
 import properties from "@/routes/properties/properties.index";
+import rates from "@/routes/rates/rates.index";
 import reviews from "@/routes/reviews/reviews.index";
 
 const app = createApp();
@@ -19,6 +20,7 @@ const routes = [
   bookings,
   payments,
   reviews,
+  rates,
   admin,
 ] as const;
 

@@ -5,7 +5,7 @@ import * as HttpStatusPhrases from "stoker/http-status-phrases";
 import type { AppRouteHandler } from "@/lib/types";
 
 import db from "@/db";
-import { bookings, properties, propertyBlackouts } from "@/db/schema";
+import { bookings, properties, propertyBlackouts, propertyRateOverrides } from "@/db/schema";
 import { isExclusionViolation } from "@/lib/db-errors";
 import { calculateBookingTotal } from "@/lib/pricing";
 
@@ -115,8 +115,28 @@ export const create: AppRouteHandler<CreateRoute> = async (c) => {
       if (blackoutHits > 0)
         return { kind: "conflict" as const };
 
+      // Seasonal rates are read inside the same transaction, under the
+      // property lock, so the snapshot cannot be taken against rates that
+      // changed midway.
+      const overrides = await tx.select({
+        startDate: propertyRateOverrides.startDate,
+        endDate: propertyRateOverrides.endDate,
+        pricePerNightCents: propertyRateOverrides.pricePerNightCents,
+      })
+        .from(propertyRateOverrides)
+        .where(and(
+          eq(propertyRateOverrides.propertyId, propertyId),
+          lt(propertyRateOverrides.startDate, checkOut),
+          gt(propertyRateOverrides.endDate, checkIn),
+        ));
+
       // Server-side price, snapshotted onto the row. Never from the client.
-      const totalAmountCents = calculateBookingTotal(property, checkIn, checkOut);
+      const totalAmountCents = calculateBookingTotal(
+        property,
+        checkIn,
+        checkOut,
+        overrides,
+      );
 
       const [booking] = await tx.insert(bookings).values({
         propertyId,
