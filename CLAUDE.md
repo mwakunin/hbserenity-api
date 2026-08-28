@@ -408,6 +408,14 @@ See `.env.example` at the repo root for the full template.
 
 ## CI and deployment
 
+Actions are pinned to **commit SHAs, not tags** — a tag like `v4` is mutable,
+and the docker job holds a token with `packages: write`, so whatever it runs
+can publish images. The trailing `# v4` comment records the release, and
+Dependabot bumps SHA and comment together. Resolve a new pin from the API
+(`/repos/<owner>/<repo>/git/ref/tags/<tag>`) rather than by hand;
+`pnpm/action-setup` uses annotated tags, so that needs one more hop to reach
+the commit.
+
 `.github/workflows/ci.yml` runs three jobs on every PR:
 
 - **test** — lint, typecheck and the full suite against a real Postgres

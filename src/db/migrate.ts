@@ -5,6 +5,8 @@ import { Pool } from "pg";
 
 import env from "@/env";
 
+import { sslConfigFor } from "./connection";
+
 /**
  * Applies migrations at deploy time.
  *
@@ -19,9 +21,7 @@ import env from "@/env";
 async function main() {
   const pool = new Pool({
     connectionString: env.DATABASE_URL,
-    ssl: env.DATABASE_URL.includes("localhost") || env.DATABASE_URL.includes("127.0.0.1")
-      ? false
-      : { rejectUnauthorized: true },
+    ssl: sslConfigFor(env.DATABASE_URL),
     // A migration run is one connection doing one thing.
     max: 1,
   });
