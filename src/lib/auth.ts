@@ -6,6 +6,7 @@ import db from "@/db";
 import * as authSchema from "@/db/auth-schema";
 import env from "@/env";
 
+import { emailEnabled, sendEmail } from "./email";
 import { normalizeKenyanPhone } from "./phone";
 
 /**
@@ -68,11 +69,34 @@ export const auth = betterAuth({
 
   emailAndPassword: {
     enabled: true,
-    // No transactional email provider is wired yet (Resend is configured but
-    // unused), so requiring verification would lock every new account out.
-    // Turn this on in the same change that sends the verification mail.
-    requireEmailVerification: false,
+    /**
+     * Verification is required wherever mail can actually be sent — which is
+     * production, since RESEND_* is mandatory there.
+     *
+     * Without it, sign-up hands out a session for an address nobody proved
+     * they own. `user.email` is UNIQUE, so an attacker can register someone
+     * else's address and permanently block the real owner from ever
+     * registering it. (OAuth takeover is separately prevented: Better Auth's
+     * `requireLocalEmailVerified` defaults to true, so a Google identity is
+     * never linked into an unverified local row.)
+     *
+     * Off in dev and test only because there is no mail provider there.
+     */
+    requireEmailVerification: emailEnabled,
     minPasswordLength: 10,
+  },
+
+  emailVerification: {
+    sendOnSignUp: emailEnabled,
+    autoSignInAfterVerification: true,
+    async sendVerificationEmail({ user: recipient, url }) {
+      await sendEmail({
+        to: recipient.email,
+        subject: "Confirm your email address",
+        body: `Confirm your email address to finish setting up your account:\n\n${url}\n\n`
+          + `If you didn't sign up you can ignore this message — the account cannot be used until it is confirmed.`,
+      });
+    },
   },
 
   // Only registered when both credentials are present — Better Auth would

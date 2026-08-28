@@ -23,6 +23,7 @@ const PRODUCTION_REQUIRED = [
   "MPESA_PASSKEY",
   "MPESA_CALLBACK_URL",
   "RESEND_API_KEY",
+  "RESEND_FROM_EMAIL",
   "IMAGEKIT_PUBLIC_KEY",
   "IMAGEKIT_PRIVATE_KEY",
   "IMAGEKIT_URL_ENDPOINT",
@@ -64,6 +65,8 @@ const EnvSchema = z.object({
 
   // --- Email (Resend) ---
   RESEND_API_KEY: z.string().optional(),
+  /** From-address for verification mail. Required alongside RESEND_API_KEY. */
+  RESEND_FROM_EMAIL: z.string().optional(),
 
   // --- Image CDN (ImageKit) ---
   IMAGEKIT_PUBLIC_KEY: z.string().optional(),
@@ -80,6 +83,14 @@ const EnvSchema = z.object({
             message: "Must be set when NODE_ENV is 'production'",
           });
         }
+      }
+
+      if (Boolean(input.RESEND_API_KEY) !== Boolean(input.RESEND_FROM_EMAIL)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["RESEND_FROM_EMAIL"],
+          message: "Set both RESEND_API_KEY and RESEND_FROM_EMAIL, or neither",
+        });
       }
 
       if (Boolean(input.GOOGLE_CLIENT_ID) !== Boolean(input.GOOGLE_CLIENT_SECRET)) {

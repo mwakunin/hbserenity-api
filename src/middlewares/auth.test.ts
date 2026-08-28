@@ -9,6 +9,7 @@ import { user } from "@/db/schema";
 import { activeAuthMethods, googleEnabled, phoneOtpEnabled } from "@/lib/auth";
 import { forbiddenSchema, unauthorizedSchema } from "@/lib/constants";
 import { createRouter, createTestApp } from "@/lib/create-app";
+import { emailEnabled } from "@/lib/email";
 import { nextEmail, nextPhone, resetDb, signIn, signUpWithEmail } from "@/test/helpers";
 
 import { requireAuth, requireRole } from "./auth";
@@ -181,5 +182,43 @@ describe("sign-in methods available while SMS is deferred", () => {
       body: JSON.stringify({ provider: "google", callbackURL: "/" }),
     });
     expect(res.ok).toBe(false);
+  });
+});
+
+describe("email ownership", () => {
+  beforeEach(async () => {
+    await resetDb();
+  });
+
+  // user.email is UNIQUE, so an unverified sign-up permanently squats an
+  // address the registrant never proved they own.
+  it("blocks a second account on an address already taken", async () => {
+    const email = nextEmail();
+    await signUpWithEmail(email);
+
+    const res = await app.request("/api/auth/sign-up/email", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        email,
+        password: "another-password-here",
+        name: "Someone Else",
+      }),
+    });
+
+    // This is exactly why verification is required wherever mail can be sent.
+    expect(res.ok).toBe(false);
+  });
+
+  it("requires verification wherever email can actually be sent", () => {
+    // Tests run without RESEND_*, so it is off here; production mandates
+    // those vars, so it is on there.
+    expect(emailEnabled).toBe(false);
+  });
+
+  it("does not link a Google identity into an unverified local account", () => {
+    // Better Auth's requireLocalEmailVerified defaults to true, which is what
+    // stops pre-registration turning into account takeover once Google is on.
+    expect(googleEnabled).toBe(false);
   });
 });

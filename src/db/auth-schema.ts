@@ -1,4 +1,4 @@
-import { boolean, index, pgTable, text, timestamp } from "drizzle-orm/pg-core";
+import { boolean, index, pgTable, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
 
 // ---------------------------------------------------------------------------
 // Owned by Better Auth. Regenerate with:
@@ -6,24 +6,29 @@ import { boolean, index, pgTable, text, timestamp } from "drizzle-orm/pg-core";
 //   npx @better-auth/cli@latest generate --config src/lib/auth.ts \
 //     --output src/db/auth-schema.ts --yes
 //
-// Two deliberate deviations from raw CLI output — reapply them after every
-// regeneration:
+// NOTE: the standalone CLI is pinned at 1.4.x while the runtime is 1.7.x, so
+// its output is missing things 1.7 requires. Regenerating is a starting point,
+// not a finished file.
+//
+// Five deliberate deviations — reapply every one after regenerating:
 //
 //  1. `user.role` has `.notNull()` added. The CLI emits a nullable column,
 //     which would force a null-check at every authorization site. The DB
 //     default ("guest") makes notNull safe.
-//  3. `account.issuer` is added by hand — Better Auth >= 1.7 requires it and
-//     the standalone CLI is still on 1.4.x, so regenerating drops it and
-//     every sign-up starts failing with "The field \"issuer\" does not
-//     exist in the \"account\" Drizzle schema".
-//  4. `.defaultNow()` is added to `session.updatedAt` and
-//     `account.updatedAt`. The CLI emits `$onUpdate` alone, which fires on
-//     UPDATE and not INSERT, leaving a NOT NULL column with no default.
 //  2. The CLI also emits `userRelations` / `sessionRelations` /
 //     `accountRelations` at the bottom of the file. They are deleted here and
 //     redefined in schema.ts instead — a second `relations(user, ...)` would
 //     collide with the domain-side one, and db/index.ts spreads both modules
 //     into one schema object, so the collision is silent.
+//  3. `account.issuer` is added by hand — Better Auth >= 1.7 requires it, so
+//     without it every sign-up fails with "The field \"issuer\" does not
+//     exist in the \"account\" Drizzle schema".
+//  4. `.defaultNow()` is added to `session.updatedAt` and
+//     `account.updatedAt`. The CLI emits `$onUpdate` alone, which fires on
+//     UPDATE and not INSERT, leaving a NOT NULL column with no default.
+//  5. `account` gains a unique index on (issuer, accountId) — the pair Better
+//     Auth treats as an account's stable identity. The CLI emits no such
+//     constraint, so duplicate rows could make account lookup ambiguous.
 //
 // Note: these timestamps are `timestamp` (no time zone), unlike the domain
 // tables which use timestamptz. That is Better Auth's choice; it stays
@@ -101,7 +106,15 @@ export const account = pgTable(
       .$onUpdate(() => new Date())
       .notNull(),
   },
-  table => [index("account_user_id_idx").on(table.userId)],
+  table => [
+    index("account_user_id_idx").on(table.userId),
+    // (issuer, accountId) is Better Auth's "stable provider-side key used to
+    // recognize an account" — findAccountOwnerByKey() looks up by exactly this
+    // pair. Nothing in the generated schema enforces it, so concurrent
+    // sign-ins or link requests could insert duplicates and make that lookup
+    // ambiguous. Deviation 5: reapply after regenerating.
+    uniqueIndex("account_issuer_account_id_idx").on(table.issuer, table.accountId),
+  ],
 );
 
 export const verification = pgTable(
