@@ -282,6 +282,69 @@ Non-default dev ports are deliberate: another project on this machine binds
   array, a scalar, `null`) fails validation, and the default hook would answer
   422 and start an endless retry loop.
 
+- **Transactional mail is best-effort and hangs off a transition, not a
+  state.** `lib/notifications.ts` never throws: a confirmation that fails must
+  not roll back a payment, and the M-Pesa callback must keep answering 200 or
+  Safaricom retries forever. Sending happens **after** the confirming
+  transaction commits — inside it, a rollback would leave the guest holding a
+  confirmation for a booking that does not exist.
+
+  `confirmPaidBooking()` in `lib/payment-settlement.ts` is the single place a
+  booking moves to `confirmed`, used by both the callback and the settlement
+  path, and it returns **whether this call moved the row**. That boolean is
+  what makes the confirmation fire exactly once: both paths are idempotent, so
+  without it every reconciliation sweep over a confirmed booking mails the
+  guest again.
+
+  A receipt and a confirmation are separate on purpose. A payment can succeed
+  against a booking cancelled while the push was in flight — that gets a
+  receipt and no confirmation, because the guest is out of pocket and needs
+  the record, but telling them the stay is confirmed would be a lie.
+
+  Guests who signed up by phone hold a `@phone.rentals.local` placeholder
+  address that satisfies the NOT NULL column and can never receive anything;
+  `isDeliverableEmail()` keeps mail from being sent there. Senders gate on
+  `emailDeliverable`, **not** `emailEnabled` — the latter also decides whether
+  Better Auth requires email verification, and turning that on under test
+  would stop sign-up returning a session. Under test `sendEmail` captures into
+  `sentEmails` rather than calling Resend, so senders must still run or the
+  tests assert nothing.
+
+- **Photos are uploaded by the client, straight to ImageKit.** The API only
+  signs the request (`POST /properties/{id}/images/upload-auth`, admin-only,
+  five-minute expiry) and records the result. Proxying the bytes would put
+  multi-megabyte uploads in the request path of an API whose every other
+  endpoint is small and transactional, for no gain — ImageKit stores the file
+  either way.
+
+  The client reports where the file landed, so `isOwnCdnUrl()` rejects
+  anything not on the configured endpoint. Unchecked, a listing could be
+  pointed at any host on the internet, including one that serves something
+  else later. That prefix must end at a **segment boundary** — a bare
+  `startsWith` on an endpoint of `/account` also accepts `/account-other/...`,
+  a different account on the same host.
+
+  The url and the fileId arrive as two independent claims, so `attach`
+  resolves the id against ImageKit and stores the url **ImageKit reports**. A
+  mismatched pair — easy for a gallery uploading several files at once to
+  produce — would otherwise record one file's address against another's
+  handle, and deleting that row would remove the unrelated file while leaving
+  the displayed one orphaned. If ImageKit cannot be reached, the attach fails
+  with 502 rather than storing an unverified pair.
+
+  `property_images.fileId` is NOT NULL and unique. It is ImageKit's handle and
+  the only way to delete the stored file — without it a removed photo stays on
+  the CDN forever, billed and unreferenced. Deletion therefore removes the CDN
+  copy **first** and keeps the row on failure (502), because dropping the row
+  on a failed delete strands a file nothing references and no id can find. A
+  404 from ImageKit counts as success, so a retry after a partial failure
+  still completes.
+
+  One cover per property, enforced by the partial unique index
+  `property_images_one_cover_idx`. Two covers has no defined answer, and a
+  check-then-update cannot prevent it — both requests read "no other cover".
+  The handlers clear then set for the ordinary case and map `23505` to 409.
+
 - **Booking price snapshot**: `bookings.totalAmountCents` is fixed at
   creation time and must never be recalculated from the property's current
   price later.
@@ -541,6 +604,31 @@ runtime dependency and reads the same journal, so the two stay consistent.
 
 The container does not run migrations itself — several instances would race.
 
+`.github/workflows/reconcile.yml` runs the reconciliation sweep every 10
+minutes, as `node ./dist/src/tasks/reconcile.js` inside the published image,
+using the whole production env file passed as the single `PRODUCTION_ENV`
+secret. One secret rather than a dozen variables, so the reconciler cannot
+drift out of step with how the API itself is configured.
+
+Two properties of GitHub's scheduler matter for a job this load-bearing.
+Schedules are **best-effort** — queued, not guaranteed on the minute — which
+is fine, since the sweep is idempotent and nothing depends on the cadence.
+But scheduled workflows are **disabled automatically after 60 days without
+repository activity**, and a silently stopped reconciler strands money and
+stops stays ever becoming reviewable. If the API runs on a host you control,
+prefer a cron entry or systemd timer there running the same command against
+the same env file; the workflow exists so scheduling does not _require_ such
+a host.
+
+Two settings are required before the workflow runs at all, and it fails rather
+than half-working without either: the `PRODUCTION_ENV` secret, and the
+`RECONCILE_IMAGE_TAG` Actions variable holding the sha tag production is
+running. The tag is deliberately **not** defaulted to `latest` — the sweep
+decides what settles a payment, so a reconciler on a different build than the
+deployed API can apply rules the API does not share, and `latest` moves by
+definition. A failing job is the louder outcome, since GitHub mails about it;
+a sweep against the wrong image looks exactly like a correct one.
+
 ## Testing
 
 `./dev.sh` must be running — the suite talks to real Postgres, not a mock.
@@ -578,24 +666,14 @@ Deliberately deferred — don't assume these exist:
   duplicate charge. Both are recorded truthfully and surfaced by
   `GET /admin/payments/attention`, but there is no reversal API call — a
   human still has to send the money back.
-- **Scheduling for reconciliation.** The sweep is idempotent but nothing
-  calls it on a timer. Point an external cron at
-  `POST /admin/payments/reconcile` every few minutes **before going live** —
-  it is load-bearing twice over: it settles payments whose callback was lost,
-  and it is the only thing that moves a finished stay to `completed`, which
-  is what makes it reviewable.
 - **An SMS provider**, so phone OTP is dormant. The plugin, columns and
   endpoints are all present and `sendOTP` throws in production.
   Email+password is the working sign-in method meanwhile.
-- **Transactional email beyond verification.** Resend sends the address
-  verification mail; booking confirmations and payment receipts are not
-  built.
-- **ImageKit uploads** — env vars only. `property_images` stores a URL that
-  something else has to produce.
 - **Partial deposits.** A payment is all-or-nothing against
   `bookings.totalAmountCents`, though 50%-now-balance-later is common
   locally.
-- **Cancellation metadata** — no `cancelledAt`, reason, or refund trail.
+- **Cancellation metadata** — no `cancelledAt` and no reason. Refunds
+  themselves are recorded; what is missing is why the booking ended.
 - **A booking idempotency key**, so a double-tapped "Book now" can create two
   bookings for different dates. The same dates are already impossible — the
   overlap constraint sees to that.

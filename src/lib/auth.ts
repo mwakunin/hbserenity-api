@@ -7,7 +7,7 @@ import * as authSchema from "@/db/auth-schema";
 import env from "@/env";
 
 import { emailEnabled, sendEmail } from "./email";
-import { normalizeKenyanPhone } from "./phone";
+import { normalizeKenyanPhone, PLACEHOLDER_EMAIL_DOMAIN } from "./phone";
 
 /**
  * Test seam: the most recent OTP issued per phone number. Populated only when
@@ -155,7 +155,7 @@ export const auth = betterAuth({
       // Better Auth expects; these placeholders are replaced if the guest
       // later adds a real address.
       signUpOnVerification: {
-        getTempEmail: to => `${normalizeKenyanPhone(to) ?? to}@phone.rentals.local`,
+        getTempEmail: to => `${normalizeKenyanPhone(to) ?? to}@${PLACEHOLDER_EMAIL_DOMAIN}`,
         getTempName: to => normalizeKenyanPhone(to) ?? to,
       },
     }),

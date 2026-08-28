@@ -10,6 +10,21 @@ import env from "@/env";
 /** Both halves are required together, so one check covers the feature. */
 export const emailEnabled = Boolean(env.RESEND_API_KEY && env.RESEND_FROM_EMAIL);
 
+/**
+ * Whether a caller should attempt to send.
+ *
+ * Deliberately not the same question as `emailEnabled`, which decides policy —
+ * Better Auth requires email verification exactly when real mail can go out,
+ * and turning that on in the test environment would mean sign-up no longer
+ * returns a session.
+ *
+ * Under test, `sendEmail` captures into `sentEmails` instead of calling
+ * Resend, so senders must still run or nothing about them is ever exercised.
+ * Gating them on `emailEnabled` would leave every notification test passing
+ * without sending anything.
+ */
+export const emailDeliverable = emailEnabled || env.NODE_ENV === "test";
+
 const client = env.RESEND_API_KEY ? new Resend(env.RESEND_API_KEY) : null;
 
 /** Test seam: mail captured instead of sent when NODE_ENV=test. */

@@ -4,6 +4,7 @@ import db from "@/db";
 import { bookings, payments } from "@/db/schema";
 
 import { queryStkStatus, verdictFor } from "./mpesa";
+import { notifyBookingConfirmed, notifyPaymentReceipt } from "./notifications";
 
 /**
  * Settling a payment attempt happens from three places — the retry path, the
@@ -44,8 +45,40 @@ export type SettleOutcome
     | "unresolved";
 
 interface Logger {
+  info: (o: object, m: string) => void;
   warn: (o: object, m: string) => void;
   error: (o: object, m: string) => void;
+}
+
+/** Anything that can run a statement — the pool, or a transaction on it. */
+type Executor = Pick<typeof db, "update">;
+
+/**
+ * Move a booking to `confirmed` because its payment succeeded.
+ *
+ * Guarded on `pending_payment`, so a booking cancelled while the payment was
+ * in flight is NOT resurrected. That surfaces as money against a cancelled
+ * booking, which is a refund for a human rather than something to paper over.
+ *
+ * Returns whether **this** call is the one that moved the row. Both the
+ * callback and this module confirm bookings, and each is idempotent, so
+ * without that distinction there is no way to tell a real confirmation from a
+ * reconciliation pass over an already-confirmed booking — and the guest would
+ * be mailed again every sweep.
+ */
+export async function confirmPaidBooking(
+  tx: Executor,
+  bookingId: string,
+): Promise<boolean> {
+  const moved = await tx.update(bookings)
+    .set({ status: "confirmed" })
+    .where(and(
+      eq(bookings.id, bookingId),
+      eq(bookings.status, "pending_payment"),
+    ))
+    .returning({ id: bookings.id });
+
+  return moved.length > 0;
 }
 
 /**
@@ -101,7 +134,7 @@ export async function settleAttemptFromProvider(
     return won.length > 0 ? "dead" : "already_settled";
   }
 
-  return db.transaction(async (tx) => {
+  const settled = await db.transaction(async (tx) => {
     const won = await tx.update(payments)
       .set({
         status: "success",
@@ -117,18 +150,22 @@ export async function settleAttemptFromProvider(
     // Someone else settled it first; leave their outcome alone, and don't
     // claim this call paid anything.
     if (won.length === 0)
-      return "already_settled" as const;
+      return { outcome: "already_settled" as const, bookingConfirmed: false };
 
-    // Guarded on status: a booking cancelled while payment was in flight is
-    // NOT resurrected. That surfaces as money against a cancelled booking,
-    // which is a refund for a human rather than something to paper over.
-    await tx.update(bookings)
-      .set({ status: "confirmed" })
-      .where(and(
-        eq(bookings.id, attempt.bookingId),
-        eq(bookings.status, "pending_payment"),
-      ));
+    const bookingConfirmed = await confirmPaidBooking(tx, attempt.bookingId);
 
-    return "paid" as const;
+    return { outcome: "paid" as const, bookingConfirmed };
   });
+
+  // Mail only after the transaction has committed — inside it, a rollback
+  // would leave the guest holding a confirmation for a booking that does not
+  // exist. Neither call throws, so nothing here can undo the settlement.
+  if (settled.outcome === "paid") {
+    await notifyPaymentReceipt(attempt.id, log);
+
+    if (settled.bookingConfirmed)
+      await notifyBookingConfirmed(attempt.bookingId, log);
+  }
+
+  return settled.outcome;
 }
