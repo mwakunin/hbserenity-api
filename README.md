@@ -116,6 +116,53 @@ change what an existing guest owes. A client-sent total is ignored.
 See [CLAUDE.md](./CLAUDE.md) for domain conventions, the Better Auth schema
 regeneration procedure, and what is deliberately not built yet.
 
+## Deploying
+
+Every merge to `main` publishes the image to GHCR — but only after the smoke
+test passes, so a broken image never reaches the registry:
+
+```text
+ghcr.io/mwakunin/hbserenity-api:latest
+ghcr.io/mwakunin/hbserenity-api:sha-<commit>
+```
+
+Deploy the **sha tag**, not `latest` — `latest` moves, so it can't be rolled
+back to. Packages are private by default; make the package public in its
+GitHub settings, or log in to pull:
+
+```sh
+docker pull ghcr.io/mwakunin/hbserenity-api:sha-abc1234
+docker run -p 9999:9999 --env-file .env.production \
+  ghcr.io/mwakunin/hbserenity-api:sha-abc1234
+```
+
+To build it yourself:
+
+```sh
+docker build -t rentals-api .
+```
+
+Migrations are **not** run by the container — with more than one instance they
+would race. Run them once per release, before rolling out, using the same
+image:
+
+```sh
+docker run --rm --env-file .env.production \
+  ghcr.io/mwakunin/hbserenity-api:sha-abc1234 \
+  node ./dist/src/db/migrate.js
+```
+
+Through `node`, not `pnpm`: the runtime image has no package manager. From a
+checkout that does, `pnpm db:migrate:deploy` runs the identical script.
+
+Either way it uses drizzle-orm's migrator rather than drizzle-kit, which is a
+devDependency and absent from a production install.
+
+The image runs as a non-root user, contains no dev dependencies or compiler,
+and its healthcheck hits `/health`, which pings the database — so a container
+that cannot reach Postgres reports unhealthy rather than serving traffic that
+cannot work.
+
 ## Reconciliation
 
 `POST /admin/payments/reconcile` **does not run on a timer.** Nothing inside

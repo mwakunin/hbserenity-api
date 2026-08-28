@@ -406,6 +406,48 @@ See `.env.example` at the repo root for the full template.
 - Don't add new top-level dependencies without checking whether Hono/Drizzle
   already cover the need.
 
+## CI and deployment
+
+Actions are pinned to **commit SHAs, not tags** — a tag like `v4` is mutable,
+and the docker job holds a token with `packages: write`, so whatever it runs
+can publish images. The trailing `# v4` comment records the release, and
+Dependabot bumps SHA and comment together. Resolve a new pin from the API
+(`/repos/<owner>/<repo>/git/ref/tags/<tag>`) rather than by hand;
+`pnpm/action-setup` uses annotated tags, so that needs one more hop to reach
+the commit.
+
+`.github/workflows/ci.yml` runs three jobs on every PR:
+
+- **test** — lint, typecheck and the full suite against a real Postgres
+  service container. Mapped to :5433 so `.env.test` works unchanged.
+- **migrations** — applies every migration to an _empty_ database.
+  Deliberately separate from the suite: `globalSetup` migrates a database
+  earlier runs already touched, so it cannot catch a migration that only
+  fails from nothing. Several fixes in this repo's history were exactly that.
+- **docker** — builds the image and starts it, asserting it serves requests
+  and that `/health` reports the database as down when it is. A built image
+  that cannot start is not a passing build.
+
+  On merges to `main` only, it then pushes to GHCR as `:latest` and
+  `:sha-<commit>`. Publishing happens **after** the smoke test, so a broken
+  image never reaches the registry, and never on pull requests — a PR should
+  prove the image builds, not publish one (a fork's token cannot write
+  packages regardless). Auth is `GITHUB_TOKEN` with `packages: write`; no
+  separate secret to manage or rotate.
+
+  Deploy the sha tag rather than `latest`: `latest` moves, so it is not
+  something you can roll back to.
+
+Deployment migrations run `node ./dist/src/db/migrate.js` — inside the image
+that is the only form that works, because the runtime stage deliberately has no
+package manager. `pnpm db:migrate:deploy` is the same script for contexts that
+do have pnpm. Either way it calls drizzle-orm's own migrator
+(`src/db/migrate.ts`) rather than `drizzle-kit`. drizzle-kit is a
+devDependency and does not exist in a `--prod` image; drizzle-orm is already a
+runtime dependency and reads the same journal, so the two stay consistent.
+
+The container does not run migrations itself — several instances would race.
+
 ## Testing
 
 `./dev.sh` must be running — the suite talks to real Postgres, not a mock.
