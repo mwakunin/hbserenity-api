@@ -1,0 +1,129 @@
+name: Reconcile payments
+
+# The reconciliation sweep, on a timer.
+#
+# This is load-bearing twice over. The payment flow deliberately leaves an
+# attempt pending whenever it cannot prove what happened, so this is what
+# eventually settles a payment whose callback was lost — and it is the only
+# thing that moves a finished stay to `completed`, which is what makes it
+# reviewable. Without it running, money strands and no stay is ever reviewed.
+#
+# Two things about GitHub's scheduler are worth knowing before relying on it:
+#
+#   1. `schedule` is best-effort. Runs are queued, not guaranteed on the
+#      minute, and can be delayed by several minutes under load. That is fine
+#      here — the sweep is idempotent and nothing depends on a precise cadence
+#      — but it is not a real-time guarantee.
+#   2. **Scheduled workflows are disabled automatically after 60 days with no
+#      repository activity.** For a job this important that is a genuine trap:
+#      a quiet month silently stops reconciliation. Either keep the repo
+#      active, re-enable it from the Actions tab when GitHub mails you, or run
+#      the sweep from the host that runs the API instead (see below).
+#
+# The host-side alternative, which has neither caveat, is the same command
+# under cron or a systemd timer on the machine already running the API:
+#
+#   */10 * * * * docker run --rm --env-file /srv/rentals/.env.production \
+#     ghcr.io/<owner>/<repo>:<tag> node ./dist/src/tasks/reconcile.js
+#
+# Prefer that if the API runs on a VPS you control. This workflow exists so
+# scheduling does not depend on having such a host.
+
+on:
+  schedule:
+    # Every 10 minutes. A stranded payment is money the guest has paid that
+    # the booking does not reflect, so the window matters more than the cost.
+    - cron: "*/10 * * * *"
+  # So a human can run the sweep immediately after an incident.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # Only to pull the image from GHCR.
+  packages: read
+
+# The sweep is safe to run twice at once — every write in it is a
+# compare-and-swap — but a backlog of queued runs helps nobody.
+concurrency:
+  group: reconcile
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    name: sweep
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The task runs from the API image with a different command, against the
+      # same environment file production uses. Passing the whole file as one
+      # secret rather than a dozen variables keeps it from drifting out of step
+      # with what the API itself is configured with — and env.ts validates the
+      # lot at startup, so a missing value fails here rather than silently
+      # skipping work.
+      - name: Run the sweep
+        env:
+          PRODUCTION_ENV: ${{ secrets.PRODUCTION_ENV }}
+          # Pin this to the sha tag production is running, via an Actions
+          # variable. `latest` moves, so it can drift ahead of the deployed
+          # API — harmless for a compare-and-swap sweep, but it means the
+          # reconciler and the API disagree about the rules.
+          IMAGE_TAG: ${{ vars.RECONCILE_IMAGE_TAG || 'latest' }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${PRODUCTION_ENV}" ]; then
+            echo "::error::The PRODUCTION_ENV secret is not set. Reconciliation cannot run." >&2
+            exit 1
+          fi
+
+          # Written with a restrictive umask and never echoed.
+          umask 077
+          printf '%s\n' "${PRODUCTION_ENV}" > production.env
+
+          IMAGE="ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]'):${IMAGE_TAG}"
+          echo "Reconciling with ${IMAGE}"
+
+          # `tee` so the JSON lines land in the log as well as the summary.
+          docker run --rm --env-file production.env "${IMAGE}" \
+            node ./dist/src/tasks/reconcile.js 2>&1 | tee sweep.log
+
+          rm -f production.env
+
+      # A sweep that ran but resolved nothing is normal; a sweep that could not
+      # run is not. The task exits non-zero on failure, so the step above
+      # already fails loudly — this just makes the outcome readable without
+      # opening the log.
+      - name: Summarise
+        if: always()
+        run: |
+          {
+            echo "### Reconciliation"
+            echo
+            if [ -s sweep.log ]; then
+              echo '```json'
+              cat sweep.log
+              echo '```'
+            else
+              echo "The sweep produced no output — it did not run."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Anything the sweep could not fix needs a human: a push dispatched with
+      # no reference, a possible duplicate charge, money against a cancelled
+      # booking. Those sit in GET /admin/payments/attention until someone acts,
+      # so surface the count where it will be noticed.
+      - name: Flag what needs a human
+        if: success()
+        run: |
+          NEEDS=$(grep -o '"needingAttention":[0-9]*' sweep.log | tail -1 | cut -d: -f2 || true)
+          if [ -n "${NEEDS:-}" ] && [ "${NEEDS}" -gt 0 ]; then
+            echo "::warning::${NEEDS} payment(s) need manual attention — see GET /admin/payments/attention"
+          fi

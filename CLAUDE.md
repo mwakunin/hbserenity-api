@@ -541,6 +541,26 @@ runtime dependency and reads the same journal, so the two stay consistent.
 
 The container does not run migrations itself — several instances would race.
 
+`.github/workflows/reconcile.yml` runs the reconciliation sweep every 10
+minutes, as `node ./dist/src/tasks/reconcile.js` inside the published image,
+using the whole production env file passed as the single `PRODUCTION_ENV`
+secret. One secret rather than a dozen variables, so the reconciler cannot
+drift out of step with how the API itself is configured.
+
+Two properties of GitHub's scheduler matter for a job this load-bearing.
+Schedules are **best-effort** — queued, not guaranteed on the minute — which
+is fine, since the sweep is idempotent and nothing depends on the cadence.
+But scheduled workflows are **disabled automatically after 60 days without
+repository activity**, and a silently stopped reconciler strands money and
+stops stays ever becoming reviewable. If the API runs on a host you control,
+prefer a cron entry or systemd timer there running the same command against
+the same env file; the workflow exists so scheduling does not *require* such
+a host.
+
+Set the `RECONCILE_IMAGE_TAG` Actions variable to the sha tag production is
+running. It defaults to `latest`, which moves, so the reconciler can otherwise
+drift ahead of the deployed API.
+
 ## Testing
 
 `./dev.sh` must be running — the suite talks to real Postgres, not a mock.
@@ -578,12 +598,6 @@ Deliberately deferred — don't assume these exist:
   duplicate charge. Both are recorded truthfully and surfaced by
   `GET /admin/payments/attention`, but there is no reversal API call — a
   human still has to send the money back.
-- **Scheduling for reconciliation.** The sweep is idempotent but nothing
-  calls it on a timer. Point an external cron at
-  `POST /admin/payments/reconcile` every few minutes **before going live** —
-  it is load-bearing twice over: it settles payments whose callback was lost,
-  and it is the only thing that moves a finished stay to `completed`, which
-  is what makes it reviewable.
 - **An SMS provider**, so phone OTP is dormant. The plugin, columns and
   endpoints are all present and `sendOTP` throws in production.
   Email+password is the working sign-in method meanwhile.
@@ -595,7 +609,8 @@ Deliberately deferred — don't assume these exist:
 - **Partial deposits.** A payment is all-or-nothing against
   `bookings.totalAmountCents`, though 50%-now-balance-later is common
   locally.
-- **Cancellation metadata** — no `cancelledAt`, reason, or refund trail.
+- **Cancellation metadata** — no `cancelledAt` and no reason. Refunds
+  themselves are recorded; what is missing is why the booking ended.
 - **A booking idempotency key**, so a double-tapped "Book now" can create two
   bookings for different dates. The same dates are already impossible — the
   overlap constraint sees to that.
