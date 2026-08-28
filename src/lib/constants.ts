@@ -16,6 +16,11 @@ export const notFoundSchema = createMessageObjectSchema(HttpStatusPhrases.NOT_FO
 export const unauthorizedSchema = createMessageObjectSchema(HttpStatusPhrases.UNAUTHORIZED);
 export const forbiddenSchema = createMessageObjectSchema(HttpStatusPhrases.FORBIDDEN);
 
+/** Returned when a caller exceeds a rate limit. */
+export const tooManyRequestsSchema = createMessageObjectSchema(
+  "Too many requests. Please slow down and try again shortly.",
+);
+
 /** Returned when a booking collides with an existing one or a blackout. */
 export const conflictSchema = createMessageObjectSchema(
   "These dates are no longer available",

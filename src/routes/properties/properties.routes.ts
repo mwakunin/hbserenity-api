@@ -5,6 +5,7 @@ import { createErrorSchema, IdUUIDParamsSchema } from "stoker/openapi/schemas";
 
 import { forbiddenSchema, notFoundSchema, unauthorizedSchema } from "@/lib/constants";
 import { requireAuth, requireRole } from "@/middlewares/auth";
+import { rateLimits } from "@/middlewares/rate-limit";
 
 import {
   insertPropertySchema,
@@ -22,7 +23,7 @@ const tags = ["Properties"];
  * than a shared array so each route gets its own mutable instance — Hono's
  * `middleware` field rejects a readonly tuple.
  */
-const adminOnly = () => [requireAuth, requireRole("admin")];
+const adminOnly = () => [requireAuth, requireRole("admin"), rateLimits.write()];
 
 export const list = createRoute({
   path: "/properties",
@@ -32,6 +33,7 @@ export const list = createRoute({
   description:
     "Public. Only returns properties with status 'active' — drafts and "
     + "deactivated listings are never exposed here.",
+  middleware: [rateLimits.read()],
   request: {
     query: listPropertiesQuerySchema,
   },

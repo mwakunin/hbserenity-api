@@ -81,6 +81,22 @@ The API is at http://localhost:9999 — API reference at
 | `POST /admin/payments/reconcile`       | admin  | Settle payments whose outcome was lost (needs external cron &mdash; see below) |
 | `GET /admin/payments/attention`        | admin  | Payments needing a human                                                       |
 
+## Rate limiting
+
+Backed by Redis so counters are shared across instances. Limits are per
+endpoint group, because abusing them costs different amounts:
+
+| Group        | Limit     | Why                                         |
+| ------------ | --------- | ------------------------------------------- |
+| Auth         | 10 / min  | Brute force and account enumeration         |
+| Payment      | 5 / 5 min | Each STK push costs money and rings a phone |
+| Writes       | 30 / min  | Bookings, blackouts, listing changes        |
+| Public reads | 120 / min | The traffic we actually want                |
+
+Signed-in callers are limited per account rather than per address. If Redis is
+unreachable the limiter fails open and logs — a cache outage should not be a
+total outage. `POST /mpesa/callback` and `GET /health` are exempt.
+
 ## Design notes
 
 **Double-booking is impossible, not merely checked.** `bookings` carries a

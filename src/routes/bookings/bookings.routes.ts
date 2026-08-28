@@ -10,6 +10,7 @@ import {
   unauthorizedSchema,
 } from "@/lib/constants";
 import { requireAuth, requireRole } from "@/middlewares/auth";
+import { rateLimits } from "@/middlewares/rate-limit";
 
 import {
   availabilityQuerySchema,
@@ -54,7 +55,7 @@ export const create = createRoute({
   description:
     "The total is computed server-side from the property's current rate and "
     + "snapshotted onto the booking. Returns 409 if the dates are taken.",
-  middleware: [requireAuth],
+  middleware: [requireAuth, rateLimits.write()],
   request: {
     body: jsonContentRequired(createBookingSchema, "The booking to create"),
   },
@@ -148,7 +149,7 @@ export const createBlackout = createRoute({
     + "without creating a fake booking. Returns 409 if the range overlaps "
     + "either an existing blackout or a booking that already holds the dates "
     + "— a sold stay can never be silently marked host-blocked.",
-  middleware: [requireAuth, requireRole("admin")],
+  middleware: [requireAuth, requireRole("admin"), rateLimits.write()],
   request: {
     body: jsonContentRequired(createBlackoutSchema, "The blackout to create"),
   },
