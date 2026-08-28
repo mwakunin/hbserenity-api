@@ -73,15 +73,39 @@ describe("rate limiting", () => {
     })).status).toBe(200);
   });
 
-  it("takes the first address from a forwarded chain", async () => {
-    const chain = { "x-forwarded-for": "9.9.9.9, 10.0.0.1, 172.16.0.1" };
-    for (let i = 0; i < 3; i += 1)
-      await app.request("/limited", { headers: chain });
+  // The chain is read from the right, where our own edge writes. Entries the
+  // client prepends are inert — otherwise rotating the header would hand out
+  // a fresh budget on every request, which is no rate limiting at all.
+  it("cannot be bypassed by prepending to the forwarded chain", async () => {
+    const realEdge = "172.16.0.1";
+    for (let i = 0; i < 3; i += 1) {
+      await app.request("/limited", {
+        headers: { "x-forwarded-for": `9.9.9.9, ${realEdge}` },
+      });
+    }
 
-    expect((await app.request("/limited", { headers: chain })).status).toBe(429);
-    // A different client behind the same proxies still has its own budget.
     expect((await app.request("/limited", {
-      headers: { "x-forwarded-for": "8.8.8.8, 10.0.0.1, 172.16.0.1" },
+      headers: { "x-forwarded-for": `9.9.9.9, ${realEdge}` },
+    })).status).toBe(429);
+
+    // Same caller, a different forged prefix — still throttled.
+    expect((await app.request("/limited", {
+      headers: { "x-forwarded-for": `8.8.8.8, evil, ${realEdge}` },
+    })).status).toBe(429);
+  });
+
+  it("still separates genuinely different callers behind the same proxy", async () => {
+    for (let i = 0; i < 3; i += 1) {
+      await app.request("/limited", {
+        headers: { "x-forwarded-for": "203.0.113.1" },
+      });
+    }
+
+    expect((await app.request("/limited", {
+      headers: { "x-forwarded-for": "203.0.113.1" },
+    })).status).toBe(429);
+    expect((await app.request("/limited", {
+      headers: { "x-forwarded-for": "203.0.113.2" },
     })).status).toBe(200);
   });
 

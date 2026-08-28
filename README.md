@@ -93,9 +93,16 @@ endpoint group, because abusing them costs different amounts:
 | Writes       | 30 / min  | Bookings, blackouts, listing changes        |
 | Public reads | 120 / min | The traffic we actually want                |
 
-Signed-in callers are limited per account rather than per address. If Redis is
-unreachable the limiter fails open and logs — a cache outage should not be a
-total outage. `POST /mpesa/callback` and `GET /health` are exempt.
+Signed-in callers are limited per account rather than per address. Anonymous
+callers are keyed by socket address; `X-Forwarded-For` is only consulted when
+`TRUST_PROXY_HOPS` says how many of your proxies are in front, and then only
+from the right of the chain — otherwise anyone could rotate the header for a
+fresh limit. **Set `TRUST_PROXY_HOPS` to your real hop count when deploying
+behind a load balancer**, or client addresses will all look like the balancer.
+
+If Redis is unreachable the limiter fails open and logs — a cache outage
+should not be a total outage. `POST /mpesa/callback` and `GET /health` are
+exempt.
 
 ## Design notes
 

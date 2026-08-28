@@ -233,6 +233,15 @@ Non-default dev ports are deliberate: another project on this machine binds
   NAT'd or shared connection cannot exhaust everyone else's budget, and
   changing networks is not a way around a limit.
 
+  Anonymous callers are keyed by an address resolved in `lib/client-ip.ts`,
+  **never by a raw header**. `X-Forwarded-For` is written by the sender, so
+  reading its leftmost entry means rotating the header yields a fresh counter
+  per request — no rate limiting at all. Resolution uses the socket address
+  unless `TRUST_PROXY_HOPS` declares how many of your own proxies sit in
+  front; the trustworthy entry is then counted from the RIGHT, where your edge
+  wrote it. Set that variable to the real hop count: too high reintroduces the
+  bypass, and 0 (the default) is correct for direct exposure.
+
   The limiter **fails open**: if Redis is unreachable the request is allowed
   and the degradation logged. A cache outage must not become a total outage,
   and the endpoints that matter have structural guards anyway — one pending

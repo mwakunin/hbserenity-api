@@ -1,12 +1,16 @@
+import type { Context } from "hono";
 import type { Redis } from "ioredis";
 import type { RateLimiterRes } from "rate-limiter-flexible";
 
+import { getConnInfo } from "@hono/node-server/conninfo";
 import { createMiddleware } from "hono/factory";
 import { RateLimiterRedis } from "rate-limiter-flexible";
 import * as HttpStatusCodes from "stoker/http-status-codes";
 
 import type { AppBindings } from "@/lib/types";
 
+import env from "@/env";
+import { resolveClientIp } from "@/lib/client-ip";
 import { redis } from "@/lib/redis";
 
 /**
@@ -39,6 +43,33 @@ function isRateLimiterRes(err: unknown): err is RateLimiterRes {
   return typeof err === "object" && err !== null && "msBeforeNext" in err;
 }
 
+/**
+ * Identifies an unauthenticated caller.
+ *
+ * Falls back to a shared bucket only when no address can be determined at
+ * all, which should not happen over TCP. Sharing is deliberate: an
+ * unidentifiable caller being limited alongside others is safer than not
+ * being limited.
+ */
+function anonymousKey(c: Context<AppBindings>): string {
+  let socketAddress: string | undefined;
+  try {
+    socketAddress = getConnInfo(c).remote.address;
+  }
+  catch {
+    // No socket behind this request — e.g. app.request() in tests.
+  }
+
+  return resolveClientIp(
+    {
+      socketAddress,
+      xForwardedFor: c.req.header("x-forwarded-for"),
+      xRealIp: c.req.header("x-real-ip"),
+    },
+    env.TRUST_PROXY_HOPS,
+  ) ?? "unknown";
+}
+
 export function rateLimit(options: RateLimitOptions) {
   const limiter = new RateLimiterRedis({
     storeClient: options.client ?? redis,
@@ -50,11 +81,12 @@ export function rateLimit(options: RateLimitOptions) {
   return createMiddleware<AppBindings>(async (c, next) => {
     // Signed-in callers are limited per account, so one person on a shared or
     // NAT'd connection cannot exhaust the budget for everyone behind it.
-    // Anonymous traffic falls back to IP.
-    const key = c.var.user?.id
-      ?? c.req.header("x-forwarded-for")?.split(",")[0].trim()
-      ?? c.req.header("x-real-ip")
-      ?? "unknown";
+    //
+    // Anonymous traffic falls back to the caller's address — resolved from
+    // the socket, not from a header the client writes. Taking X-Forwarded-For
+    // at face value would let anyone rotate it for a fresh counter per
+    // request, which is no rate limiting at all.
+    const key = c.var.user?.id ?? anonymousKey(c);
 
     try {
       await limiter.consume(key);
