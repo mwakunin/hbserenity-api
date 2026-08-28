@@ -177,11 +177,31 @@ export const propertyImages = pgTable(
       .notNull()
       .references(() => properties.id, { onDelete: "cascade" }),
     url: text("url").notNull(),
+    /**
+     * ImageKit's own id for the file.
+     *
+     * Required, and the only way to delete the stored file: without it a
+     * removed image leaves a copy on the CDN forever, billed and unreferenced.
+     * Unique because one uploaded file belongs to one listing — re-submitting
+     * the same upload is a duplicate, not a second photo.
+     */
+    fileId: text("file_id").notNull(),
     order: integer("order").notNull().default(0),
     isCover: boolean("is_cover").notNull().default(false),
     createdAt: createdAt(),
   },
-  table => [index("property_images_property_idx").on(table.propertyId)],
+  table => [
+    index("property_images_property_idx").on(table.propertyId),
+    uniqueIndex("property_images_file_id_idx").on(table.fileId),
+    /**
+     * At most one cover per property. Two covers has no defined answer — the
+     * listing picks whichever row sorts first — and a check-then-update cannot
+     * prevent it, since two concurrent requests both read "no other cover".
+     */
+    uniqueIndex("property_images_one_cover_idx")
+      .on(table.propertyId)
+      .where(sql`${table.isCover}`),
+  ],
 );
 
 // ---------------------------------------------------------------------------

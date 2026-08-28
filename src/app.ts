@@ -3,6 +3,7 @@ import createApp from "@/lib/create-app";
 import admin from "@/routes/admin/admin.index";
 import bookings from "@/routes/bookings/bookings.index";
 import health from "@/routes/health.route";
+import images from "@/routes/images/images.index";
 import index from "@/routes/index.route";
 import payments from "@/routes/payments/payments.index";
 import properties from "@/routes/properties/properties.index";
@@ -21,6 +22,7 @@ const routes = [
   payments,
   reviews,
   rates,
+  images,
   admin,
 ] as const;
 

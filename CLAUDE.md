@@ -310,6 +310,31 @@ Non-default dev ports are deliberate: another project on this machine binds
   `sentEmails` rather than calling Resend, so senders must still run or the
   tests assert nothing.
 
+- **Photos are uploaded by the client, straight to ImageKit.** The API only
+  signs the request (`POST /properties/{id}/images/upload-auth`, admin-only,
+  five-minute expiry) and records the result. Proxying the bytes would put
+  multi-megabyte uploads in the request path of an API whose every other
+  endpoint is small and transactional, for no gain — ImageKit stores the file
+  either way.
+
+  The client reports where the file landed, so `isOwnCdnUrl()` rejects
+  anything not on the configured endpoint. Unchecked, a listing could be
+  pointed at any host on the internet, including one that serves something
+  else later.
+
+  `property_images.fileId` is NOT NULL and unique. It is ImageKit's handle and
+  the only way to delete the stored file — without it a removed photo stays on
+  the CDN forever, billed and unreferenced. Deletion therefore removes the CDN
+  copy **first** and keeps the row on failure (502), because dropping the row
+  on a failed delete strands a file nothing references and no id can find. A
+  404 from ImageKit counts as success, so a retry after a partial failure
+  still completes.
+
+  One cover per property, enforced by the partial unique index
+  `property_images_one_cover_idx`. Two covers has no defined answer, and a
+  check-then-update cannot prevent it — both requests read "no other cover".
+  The handlers clear then set for the ordinary case and map `23505` to 409.
+
 - **Booking price snapshot**: `bookings.totalAmountCents` is fixed at
   creation time and must never be recalculated from the property's current
   price later.
@@ -629,8 +654,6 @@ Deliberately deferred — don't assume these exist:
 - **An SMS provider**, so phone OTP is dormant. The plugin, columns and
   endpoints are all present and `sendOTP` throws in production.
   Email+password is the working sign-in method meanwhile.
-- **ImageKit uploads** — env vars only. `property_images` stores a URL that
-  something else has to produce.
 - **Partial deposits.** A payment is all-or-nothing against
   `bookings.totalAmountCents`, though 50%-now-balance-later is common
   locally.
