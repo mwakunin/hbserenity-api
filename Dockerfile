@@ -44,6 +44,14 @@ ENV NODE_ENV=production
 # `timestamp` without a zone — so the process must not drift from it.
 ENV TZ=UTC
 
+# env.ts requires LOG_LEVEL and gives it no default, which is right for a
+# checkout — .env.example sets it — but wrong for an image, which has no .env
+# to read. Without this the container exits before serving anything, and every
+# command that runs from this image fails the same way, the reconciliation
+# sweep included. An operational knob with a sane production value belongs
+# with NODE_ENV and TZ above; override it at run time like any other.
+ENV LOG_LEVEL=info
+
 COPY --from=prod-deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY package.json ./
