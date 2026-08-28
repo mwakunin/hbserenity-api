@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNotNull, isNull, lt, sql } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, isNull, lt, lte, sql } from "drizzle-orm";
 
 import db from "@/db";
 import { bookings, payments } from "@/db/schema";
@@ -160,6 +160,31 @@ export async function paymentsNeedingAttention(): Promise<AttentionItem[]> {
       createdAt: r.createdAt,
     };
   });
+}
+
+/**
+ * Moves finished stays from `confirmed` to `completed`.
+ *
+ * Nothing else advanced a booking past `confirmed`, so the lifecycle
+ * documented as pending_payment -> confirmed -> completed stopped one step
+ * short and the final status was unreachable. Reviews depend on it: only a
+ * guest who actually stayed may review, and this is what records that.
+ *
+ * Uses the half-open convention — a stay ending today is over, because
+ * check-out day is already bookable by the next guest.
+ */
+export async function completePastStays(): Promise<number> {
+  const today = new Date().toISOString().slice(0, 10);
+
+  const completed = await db.update(bookings)
+    .set({ status: "completed" })
+    .where(and(
+      eq(bookings.status, "confirmed"),
+      lte(bookings.checkOut, today),
+    ))
+    .returning({ id: bookings.id });
+
+  return completed.length;
 }
 
 /** Releases attempts that never got as far as a push, so retries aren't blocked. */

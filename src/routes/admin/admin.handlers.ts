@@ -3,6 +3,7 @@ import * as HttpStatusCodes from "stoker/http-status-codes";
 import type { AppRouteHandler } from "@/lib/types";
 
 import {
+  completePastStays,
   paymentsNeedingAttention,
   reconcilePayments,
   releaseUndispatched,
@@ -17,7 +18,14 @@ export const reconcile: AppRouteHandler<ReconcileRoute> = async (c) => {
   // safe and unblocks the guest's retries.
   const releasedUndispatched = await releaseUndispatched();
 
-  return c.json({ ...summary, releasedUndispatched }, HttpStatusCodes.OK);
+  // Stays that have ended move to `completed`, which is what makes them
+  // reviewable. Nothing else advances a booking past `confirmed`.
+  const staysCompleted = await completePastStays();
+
+  return c.json(
+    { ...summary, releasedUndispatched, staysCompleted },
+    HttpStatusCodes.OK,
+  );
 };
 
 export const attention: AppRouteHandler<AttentionRoute> = async (c) => {
