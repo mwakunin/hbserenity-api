@@ -13,6 +13,22 @@ const KENYA_COUNTRY_CODE = "254";
 const NSN_PATTERN = /^[71]\d{8}$/;
 
 /**
+ * Domain of the placeholder address a phone-first signup gets.
+ *
+ * `user.email` is NOT NULL UNIQUE in Better Auth, so a guest who signed up by
+ * phone has an address that satisfies the column and nothing else. Mail sent
+ * there goes nowhere, so anything that sends must check for it — see
+ * `isDeliverableEmail`. Shared with `auth.ts` rather than written twice: two
+ * copies of this string that disagree would silently start mailing the void.
+ */
+export const PLACEHOLDER_EMAIL_DOMAIN = "phone.rentals.local";
+
+/** Whether an address can actually receive mail, as opposed to satisfying a column. */
+export function isDeliverableEmail(address: string): boolean {
+  return !address.toLowerCase().endsWith(`@${PLACEHOLDER_EMAIL_DOMAIN}`);
+}
+
+/**
  * Normalize a Kenyan phone number to E.164 (`+2547XXXXXXXX`).
  *
  * @returns the normalized number, or `null` if it isn't a valid Kenyan mobile.

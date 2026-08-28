@@ -282,6 +282,34 @@ Non-default dev ports are deliberate: another project on this machine binds
   array, a scalar, `null`) fails validation, and the default hook would answer
   422 and start an endless retry loop.
 
+- **Transactional mail is best-effort and hangs off a transition, not a
+  state.** `lib/notifications.ts` never throws: a confirmation that fails must
+  not roll back a payment, and the M-Pesa callback must keep answering 200 or
+  Safaricom retries forever. Sending happens **after** the confirming
+  transaction commits — inside it, a rollback would leave the guest holding a
+  confirmation for a booking that does not exist.
+
+  `confirmPaidBooking()` in `lib/payment-settlement.ts` is the single place a
+  booking moves to `confirmed`, used by both the callback and the settlement
+  path, and it returns **whether this call moved the row**. That boolean is
+  what makes the confirmation fire exactly once: both paths are idempotent, so
+  without it every reconciliation sweep over a confirmed booking mails the
+  guest again.
+
+  A receipt and a confirmation are separate on purpose. A payment can succeed
+  against a booking cancelled while the push was in flight — that gets a
+  receipt and no confirmation, because the guest is out of pocket and needs
+  the record, but telling them the stay is confirmed would be a lie.
+
+  Guests who signed up by phone hold a `@phone.rentals.local` placeholder
+  address that satisfies the NOT NULL column and can never receive anything;
+  `isDeliverableEmail()` keeps mail from being sent there. Senders gate on
+  `emailDeliverable`, **not** `emailEnabled` — the latter also decides whether
+  Better Auth requires email verification, and turning that on under test
+  would stop sign-up returning a session. Under test `sendEmail` captures into
+  `sentEmails` rather than calling Resend, so senders must still run or the
+  tests assert nothing.
+
 - **Booking price snapshot**: `bookings.totalAmountCents` is fixed at
   creation time and must never be recalculated from the property's current
   price later.
@@ -601,9 +629,6 @@ Deliberately deferred — don't assume these exist:
 - **An SMS provider**, so phone OTP is dormant. The plugin, columns and
   endpoints are all present and `sendOTP` throws in production.
   Email+password is the working sign-in method meanwhile.
-- **Transactional email beyond verification.** Resend sends the address
-  verification mail; booking confirmations and payment receipts are not
-  built.
 - **ImageKit uploads** — env vars only. `property_images` stores a URL that
   something else has to produce.
 - **Partial deposits.** A payment is all-or-nothing against

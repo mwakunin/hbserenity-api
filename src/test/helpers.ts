@@ -8,6 +8,7 @@ import app from "@/app";
 import db, { pool } from "@/db";
 import { properties, user } from "@/db/schema";
 import { sentOtps } from "@/lib/auth";
+import { sentEmails } from "@/lib/email";
 import { normalizeKenyanPhone } from "@/lib/phone";
 import { redis } from "@/lib/redis";
 
@@ -30,6 +31,10 @@ export async function resetRateLimits() {
 
 export async function resetDb() {
   await resetRateLimits();
+
+  // Captured mail is per-test state like anything else. Left uncleared, a
+  // later test sees a previous one's messages and asserts against them.
+  sentEmails.length = 0;
 
   const { rows } = await pool.query<{ tablename: string }>(`
     SELECT tablename FROM pg_tables

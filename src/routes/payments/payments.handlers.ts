@@ -15,7 +15,9 @@ import {
   stkPush,
   verdictFor,
 } from "@/lib/mpesa";
+import { notifyBookingConfirmed, notifyPaymentReceipt } from "@/lib/notifications";
 import {
+  confirmPaidBooking,
   RESOLVABLE_STATUSES,
   settleAttemptFromProvider,
   SETTLED_STATUSES,
@@ -55,7 +57,11 @@ type StaleOutcome = "still_live" | "released" | "already_paid";
  */
 async function releaseStaleAttempt(
   attempt: typeof payments.$inferSelect,
-  log: { warn: (o: object, m: string) => void; error: (o: object, m: string) => void },
+  log: {
+    info: (o: object, m: string) => void;
+    warn: (o: object, m: string) => void;
+    error: (o: object, m: string) => void;
+  },
 ): Promise<StaleOutcome> {
   const age = Date.now() - attempt.createdAt.getTime();
 
@@ -443,7 +449,7 @@ export const callback: AppRouteHandler<CallbackRoute> = async (c) => {
     return c.json(ACK, HttpStatusCodes.OK);
   }
 
-  await db.transaction(async (tx) => {
+  const settled = await db.transaction(async (tx) => {
     const won = await tx.update(payments)
       .set({
         status: "success",
@@ -459,21 +465,27 @@ export const callback: AppRouteHandler<CallbackRoute> = async (c) => {
 
     // Another callback settled it first; leave its outcome alone.
     if (won.length === 0)
-      return;
+      return { won: false, bookingConfirmed: false };
 
-    // Guarded on the current status: if the guest cancelled while the payment
-    // was in flight, the money is recorded but the booking is NOT resurrected.
-    // That surfaces as a successful payment against a cancelled booking, which
-    // is a refund case for a human, not something to paper over here.
-    await tx.update(bookings)
-      .set({ status: "confirmed" })
-      .where(and(
-        eq(bookings.id, payment.bookingId),
-        eq(bookings.status, "pending_payment"),
-      ));
+    // Shared with the settlement path rather than repeated here: both must
+    // guard on `pending_payment` identically, and both need to know whether
+    // they were the call that moved the row.
+    const bookingConfirmed = await confirmPaidBooking(tx, payment.bookingId);
+
+    return { won: true, bookingConfirmed };
   });
 
   log.info({ paymentId: payment.id }, "M-Pesa payment confirmed");
+
+  // After the commit, and never in a way that can change the response. A
+  // callback that answers anything but 200 makes Safaricom retry indefinitely,
+  // so mail must not be able to fail this request — neither call throws.
+  if (settled.won) {
+    await notifyPaymentReceipt(payment.id, log);
+
+    if (settled.bookingConfirmed)
+      await notifyBookingConfirmed(payment.bookingId, log);
+  }
 
   return c.json(ACK, HttpStatusCodes.OK);
 };
