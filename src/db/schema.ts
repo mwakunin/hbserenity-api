@@ -121,6 +121,12 @@ export const properties = pgTable(
 
     // Money stored as integer lowest-denomination units (cents) — never float.
     pricePerNightCents: integer("price_per_night_cents").notNull(),
+    /**
+     * Optional Friday/Saturday rate. Null means weekends cost the same as
+     * any other night. A recurring rule rather than a date range, which is
+     * why it lives here instead of in property_rate_overrides.
+     */
+    weekendPriceCents: integer("weekend_price_cents"),
     cleaningFeeCents: integer("cleaning_fee_cents").notNull().default(0),
     currency: text("currency").notNull().default("KES"),
 
@@ -133,6 +139,10 @@ export const properties = pgTable(
     index("properties_status_idx").on(table.status),
     wholeShillings("properties_price_per_night_whole", table.pricePerNightCents),
     wholeShillings("properties_cleaning_fee_whole", table.cleaningFeeCents),
+    check(
+      "properties_weekend_price_whole",
+      sql`${table.weekendPriceCents} IS NULL OR (${table.weekendPriceCents} % 100 = 0 AND ${table.weekendPriceCents} >= 0)`,
+    ),
     // `bedrooms` counts separate enclosed sleeping rooms, so 0 is legitimate
     // (a studio or bedsitter). `bathrooms` may be 0 where ablutions are
     // shared. `beds` is places to sleep and is never 0 — a listing with
@@ -197,6 +207,37 @@ export const propertyBlackouts = pgTable(
   table => [
     index("property_blackouts_property_idx").on(table.propertyId),
     check("property_blackouts_dates_valid", sql`${table.endDate} > ${table.startDate}`),
+  ],
+);
+
+// ---------------------------------------------------------------------------
+// Seasonal rates — a nightly price for a date range, overriding the
+// property's base and weekend rates. One flat rate is a poor fit for Kenyan
+// STR: Diani high season and Nairobi weekday-business rates differ sharply.
+// ---------------------------------------------------------------------------
+
+export const propertyRateOverrides = pgTable(
+  "property_rate_overrides",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    propertyId: uuid("property_id")
+      .notNull()
+      .references(() => properties.id, { onDelete: "cascade" }),
+    // Half-open [startDate, endDate), matching bookings and blackouts, so a
+    // season ending the 1st does not also price the 1st.
+    startDate: date("start_date", { mode: "string" }).notNull(),
+    endDate: date("end_date", { mode: "string" }).notNull(),
+    pricePerNightCents: integer("price_per_night_cents").notNull(),
+    /** Shown to admins, e.g. "December high season". */
+    label: text("label"),
+    createdAt: createdAt(),
+  },
+  table => [
+    index("property_rate_overrides_property_idx").on(table.propertyId),
+    check("property_rate_overrides_dates_valid", sql`${table.endDate} > ${table.startDate}`),
+    wholeShillings("property_rate_overrides_price_whole", table.pricePerNightCents),
+    // Overlapping ranges would make a night's price ambiguous. Enforced by an
+    // EXCLUDE constraint in a hand-written migration, as for blackouts.
   ],
 );
 
@@ -389,6 +430,7 @@ export const propertiesRelations = relations(properties, ({ one, many }) => ({
   images: many(propertyImages),
   amenities: many(propertyAmenities),
   blackouts: many(propertyBlackouts),
+  rateOverrides: many(propertyRateOverrides),
   bookings: many(bookings),
   reviews: many(reviews),
 }));
@@ -403,6 +445,13 @@ export const propertyImagesRelations = relations(propertyImages, ({ one }) => ({
 export const propertyBlackoutsRelations = relations(propertyBlackouts, ({ one }) => ({
   property: one(properties, {
     fields: [propertyBlackouts.propertyId],
+    references: [properties.id],
+  }),
+}));
+
+export const propertyRateOverridesRelations = relations(propertyRateOverrides, ({ one }) => ({
+  property: one(properties, {
+    fields: [propertyRateOverrides.propertyId],
     references: [properties.id],
   }),
 }));

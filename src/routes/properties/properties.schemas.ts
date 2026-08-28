@@ -46,6 +46,7 @@ const rawInsertProperty = createInsertSchema(properties, {
   longitude: field => field.min(-180).max(180),
   pricePerNightCents: wholeShillings,
   cleaningFeeCents: wholeShillings,
+  weekendPriceCents: wholeShillings,
 }).omit({
   id: true,
   // Derived from the session, never from the client.

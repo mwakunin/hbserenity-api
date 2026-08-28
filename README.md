@@ -5,8 +5,7 @@ guests.
 
 > **Status:** booking and M-Pesa payment are complete and tested against a
 > mocked Safaricom. Add your Daraja credentials to `.env` to run it for real.
-> Not yet built: refunds, booking-confirmation email, photo uploads, and
-> seasonal pricing —
+> Not yet built: refunds, booking-confirmation email, and photo uploads —
 > see [CLAUDE.md](./CLAUDE.md) for the full list.
 
 Built on [Hono](https://hono.dev/) with `@hono/zod-openapi`, Drizzle ORM
@@ -139,6 +138,14 @@ directly whether the money moved, and confirms only if it agrees. If that
 check can't be made, the payment stays `pending` rather than confirming — it
 fails closed. The `checkoutRequestId` is never returned to the client, so a
 guest can't start a real push, cancel it, and forge their own confirmation.
+
+**Pricing has three layers.** A seasonal override for a date range beats the
+optional Friday/Saturday weekend rate, which beats the property's base rate. A
+season priced for Christmas shouldn't be quietly undercut because the 25th
+falls on a Friday. `GET /properties/{id}/quote` shows the breakdown per night
+and why each rate applied, using the same calculation the booking performs. It
+is a quote, not a held price: the booking snapshots rates at booking time, so
+a rate changed in between produces a different total.
 
 **Prices are snapshotted.** `bookings.totalAmountCents` is computed server-side
 at creation and never recalculated — changing a property's rate must not

@@ -321,6 +321,34 @@ Non-default dev ports are deliberate: another project on this machine binds
   errors drizzle actually throws, since a change in how drizzle wraps errors
   would silently turn every mapped 409/422 back into a 500.
 
+- **Nightly price resolves in one place**, `nightlyRate()` in
+  `lib/pricing.ts`, with a deliberate precedence: a `property_rate_overrides`
+  row for the date wins, then the property's optional Friday/Saturday
+  `weekendPriceCents`, then the base rate. An explicit season must beat a
+  recurring rule, or a Christmas price would be undercut whenever the date
+  landed on a Friday.
+
+  Overrides are half-open like everything else, and cannot overlap —
+  `property_rate_overrides_no_overlap` is an EXCLUDE constraint, because a
+  night with two prices has no defined answer and a pre-check cannot stop two
+  concurrent inserts.
+
+  The booking reads overrides **inside the same transaction, under the
+  property lock**, so a snapshot cannot be taken against rates that changed
+  midway. Rate writes take that same lock. For an _insert_ that is belt and
+  braces — the foreign key to `properties` already takes a KEY SHARE lock that
+  conflicts — but a _delete_ touches no such key, so without it a removal
+  could land inside a booking's price computation.
+
+  Stays are capped at `MAX_STAY_NIGHTS`. Pricing expands a stay night by
+  night, so an uncapped range on the public quote is a denial of service
+  rather than a large answer: 2020 to 9999 is ~2.9 million objects and ~175MB
+  of JSON. The request schemas reject it as a 422 and `nightlyBreakdown`
+  throws as a backstop. `GET /properties/{id}/quote` runs the identical calculation, so the two agree
+  for a given set of rates — but they are separate requests and the booking
+  snapshots at booking time, so a rate changed in between legitimately yields
+  a different total. Don't document it as a held price.
+
 - **Never trust a client-sent price.** `bookings.totalAmountCents` is always
   computed by `calculateBookingTotal()` in `src/lib/pricing.ts`, the single
   source of truth for what a stay costs.
