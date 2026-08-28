@@ -97,7 +97,10 @@ Non-default dev ports are deliberate: another project on this machine binds
   constraint, or the caller gets a generic message.
 
 - **Booking status lifecycle**: `pending_payment → confirmed → completed`,
-  or `→ cancelled` from `pending_payment`. Don't add new statuses without
+  or `→ cancelled` from `pending_payment`. The last step is applied by
+  `completePastStays()` in the reconciliation sweep once check-out has passed
+  — nothing else advances a booking, so without that sweep running no stay
+  ever becomes reviewable. Don't add new statuses without
   updating every place that switches on `booking.status` — including the
   `WHERE` clause of the `bookings_no_overlap` constraint, which lists the
   statuses that hold dates (`pending_payment`, `confirmed`).
@@ -222,6 +225,17 @@ Non-default dev ports are deliberate: another project on this machine binds
   successful push the booking is re-read, and a prompt sent against an
   already-settled booking is flagged on the payment for refund review. Keep
   that flag; it is the only trace of a genuine duplicate charge.
+
+- **A review belongs to a booking, not a property.** That is what makes it
+  trustworthy: only the guest on the booking may write one, only once the stay
+  is `completed`, and only once ever. `reviews_booking_idx` is unique, which
+  is the real guard — two concurrent submissions both pass the handler checks.
+  `propertyId` and `guestId` come from the booking and never from the request,
+  or a guest could attach a review to somewhere they never stayed.
+
+  The public listing exposes the reviewer's **name only**, never their id or
+  contact details, and the average is computed across every review rather than
+  the page returned.
 
 - **Rate limits are per endpoint group, not global** (`middlewares/rate-limit.ts`),
   because abusing different endpoints costs wildly different amounts. An STK
@@ -525,4 +539,3 @@ Deliberately deferred — don't assume these exist:
   **cancellation metadata** (no `cancelledAt`/reason/refund trail), and a
   **booking idempotency key** so a double-tapped "Book now" can't create two
   bookings.
-- **Reviews** — table and relations exist; no routes.

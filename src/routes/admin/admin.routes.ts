@@ -16,6 +16,7 @@ export const reconcileResponseSchema = z.object({
   alreadySettled: z.number().int(),
   unresolved: z.number().int(),
   releasedUndispatched: z.number().int(),
+  staysCompleted: z.number().int(),
 });
 
 export const attentionResponseSchema = z.object({
