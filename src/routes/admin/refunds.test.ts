@@ -69,14 +69,14 @@ describe("refunds", () => {
     });
 
     it("403s a guest", async () => {
-      const res = await refund(guest, { amountCents: 100_000, reason: "nope" });
+      const res = await refund(guest, { amountCents: 100_000, reason: "nope", mpesaReference: "REFN" });
       expect(res.status).toBe(403);
     });
 
     it("404s an unknown payment", async () => {
       const res = await refund(
         admin,
-        { amountCents: 100_000, reason: "x" },
+        { amountCents: 100_000, reason: "x", mpesaReference: "REFX" },
         "4651e634-a530-4484-9b09-9616a28f35e3",
       );
       expect(res.status).toBe(404);
@@ -87,14 +87,14 @@ describe("refunds", () => {
       "409s a payment that is %s rather than successful",
       async (status) => {
         await db.update(payments).set({ status }).where(eq(payments.id, paymentId));
-        const res = await refund(admin, { amountCents: 100_000, reason: "x" });
+        const res = await refund(admin, { amountCents: 100_000, reason: "x", mpesaReference: "REFX" });
         expect(res.status).toBe(409);
       },
     );
 
     it("allows partial refunds that add up", async () => {
-      expect((await refund(admin, { amountCents: 1_000_000, reason: "part one" })).status).toBe(201);
-      expect((await refund(admin, { amountCents: 1_700_000, reason: "part two" })).status).toBe(201);
+      expect((await refund(admin, { amountCents: 1_000_000, reason: "part one", mpesaReference: "REF1" })).status).toBe(201);
+      expect((await refund(admin, { amountCents: 1_700_000, reason: "part two", mpesaReference: "REF2" })).status).toBe(201);
 
       const { refundedCents, outstandingCents } = await (await listRefunds()).json();
       expect(refundedCents).toBe(2_700_000);
@@ -102,9 +102,9 @@ describe("refunds", () => {
     });
 
     it("409s a refund that would exceed the payment", async () => {
-      await refund(admin, { amountCents: 2_000_000, reason: "part" });
+      await refund(admin, { amountCents: 2_000_000, reason: "part", mpesaReference: "REF3" });
 
-      const res = await refund(admin, { amountCents: 1_000_000, reason: "too much" });
+      const res = await refund(admin, { amountCents: 1_000_000, reason: "too much", mpesaReference: "REF4" });
       expect(res.status).toBe(409);
       expect((await res.json()).message).toMatch(/already been returned/);
     });
@@ -113,8 +113,8 @@ describe("refunds", () => {
     // what makes the running sum trustworthy.
     it("cannot be pushed over the total by concurrent refunds", async () => {
       const results = await Promise.all([
-        refund(admin, { amountCents: 2_000_000, reason: "a" }),
-        refund(admin, { amountCents: 2_000_000, reason: "b" }),
+        refund(admin, { amountCents: 2_000_000, reason: "a", mpesaReference: "REFA" }),
+        refund(admin, { amountCents: 2_000_000, reason: "b", mpesaReference: "REFB" }),
       ]);
 
       expect(results.map(r => r.status).sort()).toEqual([201, 409]);
@@ -184,7 +184,7 @@ describe("refunds", () => {
           .for("update");
 
         writer = Promise.resolve(
-          refund(admin, { amountCents: 100_000, reason: "concurrent" }),
+          refund(admin, { amountCents: 100_000, reason: "concurrent", mpesaReference: "REFC" }),
         ).then((r: Response) => {
           finished = true;
           return r;
@@ -204,7 +204,27 @@ describe("refunds", () => {
       ["negative", -100],
       ["not whole shillings", 12_345],
     ])("422s an amount that is %s", async (_label, amountCents) => {
-      expect((await refund(admin, { amountCents, reason: "x" })).status).toBe(422);
+      expect((await refund(admin, { amountCents, reason: "x", mpesaReference: "REFX" })).status).toBe(422);
+    });
+
+    // The reference is what separates a refund that happened from an
+    // intention to make one — and recording one clears the payment from the
+    // attention list, so an unbacked record would hide a real debt.
+    it("422s a refund with no reference", async () => {
+      const res = await refund(admin, {
+        amountCents: 2_700_000,
+        reason: "Guest cancelled",
+      });
+      expect(res.status).toBe(422);
+    });
+
+    it("422s an empty reference", async () => {
+      const res = await refund(admin, {
+        amountCents: 100_000,
+        reason: "x",
+        mpesaReference: "   ",
+      });
+      expect(res.status).toBe(422);
     });
 
     it("422s an empty reason", async () => {
@@ -226,7 +246,7 @@ describe("refunds", () => {
     });
 
     it("still flags it after a partial refund", async () => {
-      await refund(admin, { amountCents: 1_000_000, reason: "partial" });
+      await refund(admin, { amountCents: 1_000_000, reason: "partial", mpesaReference: "REFP" });
 
       const { data } = await (await attention()).json();
       expect(data).toHaveLength(1);
@@ -234,8 +254,21 @@ describe("refunds", () => {
 
     // Otherwise every handled case sits there forever and the list stops
     // being worth reading.
+    // An unreferenced refund cannot exist, so it cannot clear the queue —
+    // this asserts the payment is still flagged after such an attempt.
+    it("keeps flagging it when a refund attempt is rejected for want of a reference", async () => {
+      const rejected = await refund(admin, {
+        amountCents: 2_700_000,
+        reason: "meant to refund but never sent",
+      });
+      expect(rejected.status).toBe(422);
+
+      const { data } = await (await attention()).json();
+      expect(data).toHaveLength(1);
+    });
+
     it("stops flagging it once fully refunded", async () => {
-      await refund(admin, { amountCents: 2_700_000, reason: "full refund" });
+      await refund(admin, { amountCents: 2_700_000, reason: "full refund", mpesaReference: "REFF" });
 
       const { data } = await (await attention()).json();
       expect(data).toEqual([]);
@@ -249,14 +282,14 @@ describe("refunds", () => {
 
       expect((await (await attention()).json()).data).toHaveLength(1);
 
-      await refund(admin, { amountCents: 2_700_000, reason: "duplicate charge returned" });
+      await refund(admin, { amountCents: 2_700_000, reason: "duplicate charge returned", mpesaReference: "REFD" });
       expect((await (await attention()).json()).data).toEqual([]);
     });
   });
 
   describe("reading refunds", () => {
     it("reports what is still owed", async () => {
-      await refund(admin, { amountCents: 700_000, reason: "partial" });
+      await refund(admin, { amountCents: 700_000, reason: "partial", mpesaReference: "REFP" });
 
       const body = await (await listRefunds()).json();
       expect(body).toMatchObject({

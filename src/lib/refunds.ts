@@ -35,7 +35,8 @@ export async function recordRefund(input: {
   paymentId: string;
   amountCents: number;
   reason: string;
-  mpesaReference?: string;
+  /** Required: proof the money actually moved. See the schema comment. */
+  mpesaReference: string;
   issuedBy: string;
 }): Promise<RefundOutcome> {
   return db.transaction(async (tx) => {

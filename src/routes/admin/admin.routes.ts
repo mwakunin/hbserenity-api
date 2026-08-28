@@ -67,8 +67,12 @@ export const recordRefundSchema = z.object({
     "Amount must be a whole number of shillings (divisible by 100)",
   ),
   reason: z.string().trim().min(1).max(500).openapi({ example: "Guest cancelled after payment" }),
-  /** The M-Pesa transaction that carried the money back, once sent. */
-  mpesaReference: z.string().trim().min(1).max(64).optional(),
+  /**
+   * The transaction that carried the money back — required. Recording a
+   * refund removes the payment from the attention list, so without proof the
+   * money moved, an intention would silently clear a real debt.
+   */
+  mpesaReference: z.string().trim().min(1).max(64).openapi({ example: "SDJ4H2K1LM" }),
 });
 
 export const refundResponseSchema = z.object({
@@ -76,7 +80,7 @@ export const refundResponseSchema = z.object({
   paymentId: z.string(),
   amountCents: z.number().int(),
   reason: z.string(),
-  mpesaReference: z.string().nullable(),
+  mpesaReference: z.string(),
   createdAt: z.date(),
 });
 
@@ -95,7 +99,10 @@ export const recordRefund = createRoute({
   description:
     "Records a refund; it does NOT move money. Safaricom's Reversal API is a "
     + "separate product this system has no credentials for, so send the money "
-    + "yourself and record the reference here. Partial refunds are allowed, "
+    + "yourself and record its reference here — the reference is required, "
+    + "because recording a refund clears the payment from the attention list "
+    + "and an unbacked record would hide money that never moved. Partial "
+    + "refunds are allowed, "
     + "and the total can never exceed what the guest paid. Once a payment is "
     + "fully refunded it stops appearing in the attention list.",
   middleware: adminOnly(),

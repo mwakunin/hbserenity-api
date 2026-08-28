@@ -365,6 +365,13 @@ Non-default dev ports are deliberate: another project on this machine binds
   `GET /admin/payments/attention`, or every handled case would sit there
   forever and the list would stop being worth reading.
 
+  **`mpesaReference` is required**, and that is load-bearing rather than
+  tidiness. Recording a refund clears the payment from the attention list, so
+  a record without proof the money moved would let an _intention_ to refund
+  erase a real debt — the failure mode the list exists to prevent. The column
+  is NOT NULL as well as required in the request schema: the schema gives a
+  readable 422, the constraint is the backstop.
+
 - **Never trust a client-sent price.** `bookings.totalAmountCents` is always
   computed by `calculateBookingTotal()` in `src/lib/pricing.ts`, the single
   source of truth for what a stay costs.

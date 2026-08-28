@@ -392,8 +392,13 @@ export const refunds = pgTable(
     amountCents: integer("amount_cents").notNull(),
     /** Why the money went back — refund reviews are read by humans. */
     reason: text("reason").notNull(),
-    /** The M-Pesa transaction that carried it, once sent. */
-    mpesaReference: text("mpesa_reference"),
+    /**
+     * The transaction that carried the money back. Required, because it is
+     * the only thing separating a refund that happened from an intention to
+     * make one — and a recorded refund clears the payment from the attention
+     * list, so an unbacked record would hide money that was never returned.
+     */
+    mpesaReference: text("mpesa_reference").notNull(),
     /** The admin who recorded it, so the trail names a person. */
     issuedBy: text("issued_by")
       .notNull()
