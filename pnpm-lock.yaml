@@ -21,8 +21,8 @@ importers:
         specifier: ^1.7.1
         version: 1.7.1(drizzle-kit@0.31.4(supports-color@7.2.0))(drizzle-orm@0.44.4(@libsql/client@0.15.10)(@types/pg@8.23.1)(kysely@0.29.5)(pg@8.23.0))(pg@8.23.0)(vitest@3.2.4(@types/debug@4.1.12)(@types/node@24.2.0)(supports-color@7.2.0)(tsx@4.20.3)(yaml@2.8.0))
       cross-env:
-        specifier: ^10.0.0
-        version: 10.0.0
+        specifier: ^10.1.0
+        version: 10.1.0
       dotenv:
         specifier: ^17.2.1
         version: 17.2.1
@@ -1450,8 +1450,8 @@ packages:
   core-js-compat@3.44.0:
     resolution: {integrity: sha512-JepmAj2zfl6ogy34qfWtcE7nHKAJnKsQFRn++scjVS2bZFllwptzw61BZcZFYBPpUznLfAvh0LGhxKppk04ClA==}
 
-  cross-env@10.0.0:
-    resolution: {integrity: sha512-aU8qlEK/nHYtVuN4p7UQgAwVljzMg8hB4YK5ThRqD2l/ziSnryncPNn7bMLt5cFYsKVKBh8HqLqyCoTupEUu7Q==}
+  cross-env@10.1.0:
+    resolution: {integrity: sha512-GsYosgnACZTADcmEyJctkJIoqAhHjttw7RsFrVoJNXbsWWqaq6Ym+7kZjq6mS45O0jij6vtiReppKQEtqWy6Dw==}
     engines: {node: '>=20'}
     hasBin: true
 
@@ -4077,7 +4077,7 @@ snapshots:
     dependencies:
       browserslist: 4.25.1
 
-  cross-env@10.0.0:
+  cross-env@10.1.0:
     dependencies:
       '@epic-web/invariant': 1.0.0
       cross-spawn: 7.0.6
