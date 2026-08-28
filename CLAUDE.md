@@ -532,6 +532,11 @@ The container does not run migrations itself — several instances would race.
   `NODE_ENV=test`.
 - Use `nextPhone()` for a unique valid Kenyan number; a hard-coded one will
   collide on the unique index.
+- **Known flake:** `resetDb()` clears rate-limit keys, so if Redis is briefly
+  unreachable every test in `rate-limit.test.ts` fails at once in
+  `beforeEach` rather than one assertion failing. Seen once in many runs and
+  not reproducible. A whole-file failure there means check Redis before
+  hunting for a logic bug.
 - UUIDs in tests must be **RFC-valid v4** — `1111...1111` fails zod's
   `.uuid()` on the version/variant nibbles and yields a confusing 422.
 
@@ -546,24 +551,36 @@ Don't weaken them.
 Deliberately deferred — don't assume these exist:
 
 - **Refunds.** A payment can succeed against a booking the guest cancelled
-  while the push was in flight. That is recorded truthfully (payment
-  `success`, booking `cancelled`) and surfaced by
+  while the push was in flight, and a prompt can be flagged as a possible
+  duplicate charge. Both are recorded truthfully and surfaced by
   `GET /admin/payments/attention`, but there is no reversal API call — a
   human still has to send the money back.
-- **Scheduling for reconciliation.** The sweep exists and is idempotent, but
-  nothing calls it on a timer. Point an external cron at
-  `POST /admin/payments/reconcile` (every few minutes) before going live.
-- **Redis rate limiting** (`rate-limiter-flexible`) — Redis runs in compose
-  but nothing uses it yet. Tightest limits belong on the STK-push endpoint.
-- **Resend email** and **ImageKit uploads** — env vars only.
+- **Scheduling for reconciliation.** The sweep is idempotent but nothing
+  calls it on a timer. Point an external cron at
+  `POST /admin/payments/reconcile` every few minutes **before going live** —
+  it is load-bearing twice over: it settles payments whose callback was lost,
+  and it is the only thing that moves a finished stay to `completed`, which
+  is what makes it reviewable.
+- **An SMS provider**, so phone OTP is dormant. The plugin, columns and
+  endpoints are all present and `sendOTP` throws in production.
+  Email+password is the working sign-in method meanwhile.
+- **Transactional email beyond verification.** Resend sends the address
+  verification mail; booking confirmations and payment receipts are not
+  built.
+- **ImageKit uploads** — env vars only. `property_images` stores a URL that
+  something else has to produce.
+- **Partial deposits.** A payment is all-or-nothing against
+  `bookings.totalAmountCents`, though 50%-now-balance-later is common
+  locally.
+- **Cancellation metadata** — no `cancelledAt`, reason, or refund trail.
+- **A booking idempotency key**, so a double-tapped "Book now" can create two
+  bookings for different dates. The same dates are already impossible — the
+  overlap constraint sees to that.
 - **`payouts`** — dropped from the schema. With a single host, guest money
   lands directly in your paybill; there is no platform→host payout leg. It
-  comes back only when a second host is onboarded.
-- **Seasonal / weekend pricing** — one flat `pricePerNightCents` today. Diani
-  high season and Nairobi weekday-business rates differ sharply, so a
-  `property_rate_overrides` table is likely the next schema change.
-- **Partial deposits** (50%-now-balance-later is common locally) — a payment
-  is currently all-or-nothing against `bookings.totalAmountCents`,
-  **cancellation metadata** (no `cancelledAt`/reason/refund trail), and a
-  **booking idempotency key** so a double-tapped "Book now" can't create two
-  bookings.
+  returns only when a second host is onboarded.
+- **The `date_holds` refactor.** Bookings and blackouts are separate tables,
+  so booking-vs-blackout overlap needs a row lock rather than a constraint.
+  Collapsing them would make it structural. Optional — the lock is correct
+  and tested — but worth doing if a third source of held dates appears, such
+  as channel-manager sync.
