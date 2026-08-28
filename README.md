@@ -121,7 +121,7 @@ regeneration procedure, and what is deliberately not built yet.
 Every merge to `main` publishes the image to GHCR — but only after the smoke
 test passes, so a broken image never reaches the registry:
 
-```
+```text
 ghcr.io/mwakunin/hbserenity-api:latest
 ghcr.io/mwakunin/hbserenity-api:sha-<commit>
 ```
@@ -143,11 +143,20 @@ docker build -t rentals-api .
 ```
 
 Migrations are **not** run by the container — with more than one instance they
-would race. Run them once per release, before rolling out:
+would race. Run them once per release, before rolling out, using the same
+image:
 
 ```sh
-pnpm db:migrate:deploy      # uses drizzle-orm's migrator, no drizzle-kit needed
+docker run --rm --env-file .env.production \
+  ghcr.io/mwakunin/hbserenity-api:sha-abc1234 \
+  node ./dist/src/db/migrate.js
 ```
+
+Through `node`, not `pnpm`: the runtime image has no package manager. From a
+checkout that does, `pnpm db:migrate:deploy` runs the identical script.
+
+Either way it uses drizzle-orm's migrator rather than drizzle-kit, which is a
+devDependency and absent from a production install.
 
 The image runs as a non-root user, contains no dev dependencies or compiler,
 and its healthcheck hits `/health`, which pings the database — so a container

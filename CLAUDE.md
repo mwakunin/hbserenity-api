@@ -438,8 +438,11 @@ the commit.
   Deploy the sha tag rather than `latest`: `latest` moves, so it is not
   something you can roll back to.
 
-Deployment migrations use `pnpm db:migrate:deploy`, which calls drizzle-orm's
-own migrator (`src/db/migrate.ts`) rather than `drizzle-kit`. drizzle-kit is a
+Deployment migrations run `node ./dist/src/db/migrate.js` — inside the image
+that is the only form that works, because the runtime stage deliberately has no
+package manager. `pnpm db:migrate:deploy` is the same script for contexts that
+do have pnpm. Either way it calls drizzle-orm's own migrator
+(`src/db/migrate.ts`) rather than `drizzle-kit`. drizzle-kit is a
 devDependency and does not exist in a `--prod` image; drizzle-orm is already a
 runtime dependency and reads the same journal, so the two stay consistent.
 

@@ -62,5 +62,13 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||9999)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
 # Migrations are deliberately NOT run here: with more than one instance they
-# would race. Run `pnpm db:migrate:deploy` as a separate release step.
+# would race. Run them as a separate release step, using this same image:
+#
+#   docker run --rm --env-file .env.production <image> \
+#     node ./dist/src/db/migrate.js
+#
+# Invoked through node, not pnpm — this stage has no package manager, and
+# adding one just to launch a script that node can run directly would be
+# weight for nothing. `pnpm db:migrate:deploy` is the same command, for
+# contexts that do have pnpm.
 CMD ["node", "./dist/src/index.js"]

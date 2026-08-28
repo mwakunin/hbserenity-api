@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
 
+# Read-only by default, so test and migrations get a token that can do nothing
+# but read the repository. The docker job re-declares its own permissions to
+# add packages: write, which is the only job that needs to publish anything.
+permissions:
+  contents: read
+
 # A newer push to the same branch makes the older run irrelevant.
 concurrency:
   group: ci-${{ github.ref }}
