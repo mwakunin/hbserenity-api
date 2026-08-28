@@ -6,7 +6,7 @@ import type { TestUser } from "@/test/helpers";
 import app from "@/app";
 import db from "@/db";
 import { properties } from "@/db/schema";
-import { makeProperty, nextPhone, resetDb, signIn, waitForBlockedBackend } from "@/test/helpers";
+import { backendPid, makeProperty, nextPhone, resetDb, signIn, waitForBlockedBackend } from "@/test/helpers";
 
 /** Fixed dates so weekday arithmetic is stable: 10th is a Thursday. */
 const THU = "2026-09-10";
@@ -267,6 +267,8 @@ describe("seasonal rates", () => {
           .where(eq(properties.id, propertyId))
           .for("update");
 
+        const holder = await backendPid(tx);
+
         writer = createOverride(admin, {
           startDate: THU,
           endDate: SUN,
@@ -276,7 +278,7 @@ describe("seasonal rates", () => {
           return r;
         });
 
-        expect(await waitForBlockedBackend()).toBe(true);
+        expect(await waitForBlockedBackend(holder)).toBe(true);
         finishedWhileLocked = finished;
       });
 
@@ -308,6 +310,8 @@ describe("seasonal rates", () => {
           .where(eq(properties.id, propertyId))
           .for("update");
 
+        const holder = await backendPid(tx);
+
         remover = Promise.resolve(app.request(`/rate-overrides/${id}`, {
           method: "DELETE",
           headers: admin.headers,
@@ -316,7 +320,7 @@ describe("seasonal rates", () => {
           return r;
         });
 
-        expect(await waitForBlockedBackend()).toBe(true);
+        expect(await waitForBlockedBackend(holder)).toBe(true);
         finishedWhileLocked = finished;
       });
 

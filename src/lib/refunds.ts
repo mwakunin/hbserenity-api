@@ -21,16 +21,6 @@ export type RefundOutcome
   /** Would take total refunds past what the guest actually paid. */
     | { kind: "exceeds_payment"; alreadyRefundedCents: number; paymentCents: number };
 
-/** Total already returned for a payment. */
-export async function refundedTotal(paymentId: string): Promise<number> {
-  const [row] = await db.select({ total: sum(refunds.amountCents) })
-    .from(refunds)
-    .where(eq(refunds.paymentId, paymentId));
-
-  // sum() is null when there are no rows, and a string otherwise.
-  return row?.total == null ? 0 : Number(row.total);
-}
-
 export async function recordRefund(input: {
   paymentId: string;
   amountCents: number;
@@ -59,6 +49,7 @@ export async function recordRefund(input: {
       .from(refunds)
       .where(eq(refunds.paymentId, input.paymentId));
 
+    // sum() is null when there are no rows, and a string otherwise.
     const alreadyRefundedCents = totals?.total == null ? 0 : Number(totals.total);
 
     if (alreadyRefundedCents + input.amountCents > payment.amountCents) {

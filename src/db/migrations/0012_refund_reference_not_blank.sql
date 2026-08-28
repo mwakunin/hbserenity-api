@@ -1,0 +1,2 @@
+ALTER TABLE "refunds" ALTER COLUMN "mpesa_reference" SET NOT NULL;--> statement-breakpoint
+ALTER TABLE "refunds" ADD CONSTRAINT "refunds_reference_not_blank" CHECK (length(trim("refunds"."mpesa_reference")) > 0);

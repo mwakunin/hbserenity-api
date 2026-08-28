@@ -409,6 +409,13 @@ export const refunds = pgTable(
     index("refunds_payment_idx").on(table.paymentId),
     check("refunds_amount_positive", sql`${table.amountCents} > 0`),
     check("refunds_amount_whole", sql`${table.amountCents} % 100 = 0`),
+    // NOT NULL alone lets '' and '   ' through, which is the same hazard by
+    // another door: a blank reference is not proof the money moved, yet it
+    // would still clear the payment from the attention list. The Zod schema
+    // trims and rejects blanks for a readable 422; this is the backstop for
+    // anything that bypasses it — a seed script, a manual insert, a future
+    // code path.
+    check("refunds_reference_not_blank", sql`length(trim(${table.mpesaReference})) > 0`),
     // The rule that total refunds never exceed the payment spans rows, so no
     // CHECK can express it. Enforced in the handler under a lock on the
     // payment row — see recordRefund().

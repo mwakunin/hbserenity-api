@@ -12,7 +12,7 @@ import {
   reconcilePayments,
   releaseUndispatched,
 } from "@/lib/reconciliation";
-import { recordRefund as recordRefundForPayment, refundedTotal } from "@/lib/refunds";
+import { recordRefund as recordRefundForPayment } from "@/lib/refunds";
 
 import type {
   AttentionRoute,
@@ -102,7 +102,11 @@ export const listRefunds: AppRouteHandler<ListRefundsRoute> = async (c) => {
     .where(eq(refunds.paymentId, id))
     .orderBy(desc(refunds.createdAt));
 
-  const refundedCents = await refundedTotal(id);
+  // Summed from the rows just read rather than re-queried. A second statement
+  // gets a second snapshot, so a refund landing between the two would make the
+  // total disagree with the list printed beside it. The list is unpaginated,
+  // so this sum is the same number by construction.
+  const refundedCents = data.reduce((total, r) => total + r.amountCents, 0);
 
   return c.json({
     data,

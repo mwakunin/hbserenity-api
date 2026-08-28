@@ -5,8 +5,9 @@ import type { TestUser } from "@/test/helpers";
 
 import app from "@/app";
 import db, { pool } from "@/db";
-import { bookings, payments } from "@/db/schema";
-import { dayFromNow, makeProperty, nextPhone, resetDb, signIn, waitForBlockedBackend } from "@/test/helpers";
+import { bookings, payments, refunds } from "@/db/schema";
+import { isCheckViolation, pgConstraintName } from "@/lib/db-errors";
+import { backendPid, dayFromNow, makeProperty, nextPhone, resetDb, signIn, waitForBlockedBackend } from "@/test/helpers";
 
 describe("refunds", () => {
   let admin: TestUser;
@@ -150,6 +151,7 @@ describe("refunds", () => {
         // What the handler actually takes: the second waits.
         await a.query("BEGIN");
         await a.query("SELECT * FROM payments WHERE id = $1 FOR UPDATE", [paymentId]);
+        const holder = (await a.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0].pid;
 
         let secondAcquired = false;
         const second = b.query("BEGIN")
@@ -158,7 +160,7 @@ describe("refunds", () => {
             secondAcquired = true;
           });
 
-        expect(await waitForBlockedBackend()).toBe(true);
+        expect(await waitForBlockedBackend(holder)).toBe(true);
         expect(secondAcquired).toBe(false);
 
         await a.query("COMMIT");
@@ -183,6 +185,8 @@ describe("refunds", () => {
           .where(eq(payments.id, paymentId))
           .for("update");
 
+        const holder = await backendPid(tx);
+
         writer = Promise.resolve(
           refund(admin, { amountCents: 100_000, reason: "concurrent", mpesaReference: "REFC" }),
         ).then((r: Response) => {
@@ -190,7 +194,7 @@ describe("refunds", () => {
           return r;
         });
 
-        expect(await waitForBlockedBackend()).toBe(true);
+        expect(await waitForBlockedBackend(holder)).toBe(true);
         finishedWhileLocked = finished;
       });
 
@@ -228,7 +232,31 @@ describe("refunds", () => {
     });
 
     it("422s an empty reason", async () => {
-      expect((await refund(admin, { amountCents: 100_000, reason: "  " })).status).toBe(422);
+      // A valid reference, so this fails for the reason and not for a
+      // missing reference — otherwise it would pass without testing anything.
+      const res = await refund(admin, {
+        amountCents: 100_000,
+        reason: "  ",
+        mpesaReference: "REFR",
+      });
+      expect(res.status).toBe(422);
+    });
+
+    // NOT NULL does not stop '' or '   ', so the column being required is not
+    // by itself the guarantee. This asserts the rule survives a path that
+    // never runs the Zod schema — a seed script, a manual insert, a handler
+    // written later.
+    it("rejects a blank reference at the database, not only in Zod", async () => {
+      const err = await db.insert(refunds).values({
+        paymentId,
+        amountCents: 100_000,
+        reason: "Bypasses validation",
+        mpesaReference: "   ",
+        issuedBy: admin.id,
+      }).then(() => undefined, (e: unknown) => e);
+
+      expect(isCheckViolation(err)).toBe(true);
+      expect(pgConstraintName(err)).toBe("refunds_reference_not_blank");
     });
   });
 

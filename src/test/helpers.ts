@@ -1,4 +1,6 @@
-import { eq } from "drizzle-orm";
+import type { SQL } from "drizzle-orm";
+
+import { eq, sql } from "drizzle-orm";
 
 import type { UserRole } from "@/lib/types";
 
@@ -152,6 +154,14 @@ export async function makeProperty(hostId: string, overrides: PropertyOverrides 
   return row;
 }
 
+/** The Postgres backend behind a transaction, so lock tests can name their holder. */
+export async function backendPid(
+  tx: { execute: (query: SQL) => Promise<{ rows: Record<string, unknown>[] }> },
+): Promise<number> {
+  const { rows } = await tx.execute(sql`SELECT pg_backend_pid() AS pid`);
+  return Number(rows[0].pid);
+}
+
 /**
  * Waits until Postgres reports a backend blocked on a lock.
  *
@@ -160,13 +170,22 @@ export async function makeProperty(hostId: string, overrides: PropertyOverrides 
  * vitest's default test timeout so a missing lock fails as an assertion
  * rather than an opaque "test timed out".
  */
-export async function waitForBlockedBackend(timeoutMs = 2500): Promise<boolean> {
+export async function waitForBlockedBackend(
+  holderPid: number,
+  timeoutMs = 2500,
+): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
+    // Only waiters blocked by *this* holder count. Any active backend waiting
+    // on any lock would otherwise satisfy the check — a dev server, a studio
+    // session, a leftover connection — and the test would pass without the
+    // contention it claims to observe.
     const { rows } = await pool.query<{ n: number }>(
       `SELECT count(*)::int AS n FROM pg_stat_activity
-       WHERE wait_event_type = 'Lock' AND state = 'active'`,
+       WHERE wait_event_type = 'Lock' AND state = 'active'
+         AND $1 = ANY(pg_blocking_pids(pid))`,
+      [holderPid],
     );
     if (rows[0].n > 0)
       return true;
