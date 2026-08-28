@@ -1,0 +1,142 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push to the same branch makes the older run irrelevant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: lint, typecheck, test
+    runs-on: ubuntu-latest
+
+    services:
+      # The suite talks to real Postgres — the exclusion constraints and
+      # SQLSTATE mapping it relies on cannot be exercised against a mock.
+      # Mapped to 5433 so .env.test works unchanged.
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: rentals
+          POSTGRES_PASSWORD: rentals
+          POSTGRES_DB: rentals_test
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U rentals -d rentals_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Must come before setup-node: its pnpm cache needs pnpm on PATH.
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      # globalSetup migrates the database, so no separate migrate step. The
+      # suite provides its own credentials via .env.test.
+      - name: Test
+        run: pnpm test -- --run
+
+  migrations:
+    name: migrations apply to an empty database
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: rentals
+          POSTGRES_PASSWORD: rentals
+          POSTGRES_DB: fresh
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U rentals -d fresh"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      # Separate from the suite on purpose: globalSetup migrates a database
+      # that previous runs already touched, so it would not catch a migration
+      # that only fails from nothing. Several fixes in this repo's history
+      # were exactly that.
+      - name: Apply every migration from scratch
+        run: pnpm exec tsx src/db/migrate.ts
+        env:
+          NODE_ENV: test
+          TEST_DATABASE_URL: postgresql://rentals:rentals@localhost:5433/fresh
+
+  docker:
+    name: docker image builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: rentals-api:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # A built image that cannot start is not a passing build.
+      - name: Container starts and reports unhealthy without a database
+        run: |
+          docker run -d --name api-smoke -p 9999:9999 \
+            -e DATABASE_URL=postgresql://nobody:nobody@127.0.0.1:1/none \
+            -e REDIS_URL=redis://127.0.0.1:6379 \
+            -e BETTER_AUTH_SECRET=ci-only-secret-that-is-long-enough-32 \
+            -e BETTER_AUTH_URL=https://example.test \
+            -e MPESA_CONSUMER_KEY=x -e MPESA_CONSUMER_SECRET=x \
+            -e MPESA_SHORTCODE=x -e MPESA_PASSKEY=x \
+            -e MPESA_CALLBACK_URL=https://example.test/cb \
+            -e RESEND_API_KEY=x -e RESEND_FROM_EMAIL=noreply@example.test \
+            -e IMAGEKIT_PUBLIC_KEY=x -e IMAGEKIT_PRIVATE_KEY=x \
+            -e IMAGEKIT_URL_ENDPOINT=https://ik.example.test \
+            rentals-api:ci
+          for i in $(seq 1 20); do
+            if curl -fsS http://localhost:9999/ >/dev/null 2>&1; then
+              echo "container serving requests"
+              # /health must report the database as down, not pretend it is up.
+              curl -s http://localhost:9999/health | tee /dev/stderr | grep -q '"database":"down"'
+              docker rm -f api-smoke >/dev/null
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "container never served a request:" >&2
+          docker logs api-smoke >&2
+          docker rm -f api-smoke >/dev/null
+          exit 1

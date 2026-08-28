@@ -116,6 +116,24 @@ change what an existing guest owes. A client-sent total is ignored.
 See [CLAUDE.md](./CLAUDE.md) for domain conventions, the Better Auth schema
 regeneration procedure, and what is deliberately not built yet.
 
+## Deploying
+
+```sh
+docker build -t rentals-api .
+```
+
+Migrations are **not** run by the container — with more than one instance they
+would race. Run them once per release, before rolling out:
+
+```sh
+pnpm db:migrate:deploy      # uses drizzle-orm's migrator, no drizzle-kit needed
+```
+
+The image runs as a non-root user, contains no dev dependencies or compiler,
+and its healthcheck hits `/health`, which pings the database — so a container
+that cannot reach Postgres reports unhealthy rather than serving traffic that
+cannot work.
+
 ## Reconciliation
 
 `POST /admin/payments/reconcile` **does not run on a timer.** Nothing inside

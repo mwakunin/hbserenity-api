@@ -15,7 +15,8 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:studio": "drizzle-kit studio",
-    "db:migrate:test": "cross-env NODE_ENV=test drizzle-kit migrate"
+    "db:migrate:test": "cross-env NODE_ENV=test drizzle-kit migrate",
+    "db:migrate:deploy": "node ./dist/src/db/migrate.js"
   },
   "dependencies": {
     "@hono/node-server": "^1.18.1",

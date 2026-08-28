@@ -406,6 +406,27 @@ See `.env.example` at the repo root for the full template.
 - Don't add new top-level dependencies without checking whether Hono/Drizzle
   already cover the need.
 
+## CI and deployment
+
+`.github/workflows/ci.yml` runs three jobs on every PR:
+
+- **test** — lint, typecheck and the full suite against a real Postgres
+  service container. Mapped to :5433 so `.env.test` works unchanged.
+- **migrations** — applies every migration to an _empty_ database.
+  Deliberately separate from the suite: `globalSetup` migrates a database
+  earlier runs already touched, so it cannot catch a migration that only
+  fails from nothing. Several fixes in this repo's history were exactly that.
+- **docker** — builds the image and starts it, asserting it serves requests
+  and that `/health` reports the database as down when it is. A built image
+  that cannot start is not a passing build.
+
+Deployment migrations use `pnpm db:migrate:deploy`, which calls drizzle-orm's
+own migrator (`src/db/migrate.ts`) rather than `drizzle-kit`. drizzle-kit is a
+devDependency and does not exist in a `--prod` image; drizzle-orm is already a
+runtime dependency and reads the same journal, so the two stay consistent.
+
+The container does not run migrations itself — several instances would race.
+
 ## Testing
 
 `./dev.sh` must be running — the suite talks to real Postgres, not a mock.
