@@ -335,7 +335,16 @@ Non-default dev ports are deliberate: another project on this machine binds
 
   The booking reads overrides **inside the same transaction, under the
   property lock**, so a snapshot cannot be taken against rates that changed
-  midway. `GET /properties/{id}/quote` runs the identical calculation, which
+  midway. Rate writes take that same lock. For an _insert_ that is belt and
+  braces — the foreign key to `properties` already takes a KEY SHARE lock that
+  conflicts — but a _delete_ touches no such key, so without it a removal
+  could land inside a booking's price computation.
+
+  Stays are capped at `MAX_STAY_NIGHTS`. Pricing expands a stay night by
+  night, so an uncapped range on the public quote is a denial of service
+  rather than a large answer: 2020 to 9999 is ~2.9 million objects and ~175MB
+  of JSON. The request schemas reject it as a 422 and `nightlyBreakdown`
+  throws as a backstop. `GET /properties/{id}/quote` runs the identical calculation, which
   is what lets a quote and the eventual charge agree.
 
 - **Never trust a client-sent price.** `bookings.totalAmountCents` is always

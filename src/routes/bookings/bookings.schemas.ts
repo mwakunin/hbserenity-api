@@ -2,6 +2,7 @@ import { z } from "@hono/zod-openapi";
 import { createSelectSchema } from "drizzle-zod";
 
 import { bookings, propertyBlackouts } from "@/db/schema";
+import { MAX_STAY_NIGHTS, nightsBetween } from "@/lib/pricing";
 import { toZodV4SchemaTyped } from "@/lib/zod-utils";
 
 export const selectBookingSchema = toZodV4SchemaTyped(createSelectSchema(bookings));
@@ -34,6 +35,14 @@ export const createBookingSchema = z.object({
 }).refine(
   b => b.checkOut > b.checkIn,
   { message: "Check-out must be after check-in", path: ["checkOut"] },
+).refine(
+  // Pricing expands the stay night by night, so the same cap that protects
+  // the public quote applies here.
+  b => nightsBetween(b.checkIn, b.checkOut) <= MAX_STAY_NIGHTS,
+  {
+    message: `A stay cannot exceed ${MAX_STAY_NIGHTS} nights`,
+    path: ["checkOut"],
+  },
 );
 
 export const availabilityQuerySchema = z.object({

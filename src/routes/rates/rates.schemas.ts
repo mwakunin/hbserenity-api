@@ -2,6 +2,7 @@ import { z } from "@hono/zod-openapi";
 import { createSelectSchema } from "drizzle-zod";
 
 import { propertyRateOverrides } from "@/db/schema";
+import { MAX_STAY_NIGHTS, nightsBetween } from "@/lib/pricing";
 import { toZodV4SchemaTyped } from "@/lib/zod-utils";
 
 export const selectRateOverrideSchema = toZodV4SchemaTyped(
@@ -37,6 +38,14 @@ export const quoteQuerySchema = z.object({
 }).refine(
   q => q.checkOut > q.checkIn,
   { message: "Check-out must be after check-in", path: ["checkOut"] },
+).refine(
+  // The response holds one object per night, so an unbounded range on a
+  // public endpoint is a denial of service rather than a big answer.
+  q => nightsBetween(q.checkIn, q.checkOut) <= MAX_STAY_NIGHTS,
+  {
+    message: `A stay cannot exceed ${MAX_STAY_NIGHTS} nights`,
+    path: ["checkOut"],
+  },
 );
 
 /**

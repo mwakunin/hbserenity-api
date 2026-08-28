@@ -20,21 +20,33 @@ export const createOverride: AppRouteHandler<CreateOverrideRoute> = async (c) =>
   const { propertyId, startDate, endDate, pricePerNightCents, label }
     = c.req.valid("json");
 
-  const [property] = await db.select({ id: properties.id })
-    .from(properties)
-    .where(eq(properties.id, propertyId));
-
-  if (!property) {
-    return c.json(
-      { message: HttpStatusPhrases.NOT_FOUND },
-      HttpStatusCodes.NOT_FOUND,
-    );
-  }
-
   try {
-    const [created] = await db.insert(propertyRateOverrides)
-      .values({ propertyId, startDate, endDate, pricePerNightCents, label })
-      .returning();
+    const created = await db.transaction(async (tx) => {
+      // Takes the same property lock booking creation holds. Without it a
+      // rate change can commit midway through a booking's price computation,
+      // so the snapshot would include or omit it depending on timing. Holding
+      // the lock makes the booking see one stable set of rates.
+      const [property] = await tx.select({ id: properties.id })
+        .from(properties)
+        .where(eq(properties.id, propertyId))
+        .for("update");
+
+      if (!property)
+        return null;
+
+      const [row] = await tx.insert(propertyRateOverrides)
+        .values({ propertyId, startDate, endDate, pricePerNightCents, label })
+        .returning();
+
+      return row;
+    });
+
+    if (!created) {
+      return c.json(
+        { message: HttpStatusPhrases.NOT_FOUND },
+        HttpStatusCodes.NOT_FOUND,
+      );
+    }
 
     return c.json(created, HttpStatusCodes.CREATED);
   }
@@ -74,9 +86,27 @@ export const listForProperty: AppRouteHandler<ListForPropertyRoute> = async (c) 
 export const removeOverride: AppRouteHandler<RemoveOverrideRoute> = async (c) => {
   const { id } = c.req.valid("param");
 
-  const [removed] = await db.delete(propertyRateOverrides)
-    .where(eq(propertyRateOverrides.id, id))
-    .returning({ id: propertyRateOverrides.id });
+  const removed = await db.transaction(async (tx) => {
+    const [existing] = await tx.select({ propertyId: propertyRateOverrides.propertyId })
+      .from(propertyRateOverrides)
+      .where(eq(propertyRateOverrides.id, id));
+
+    if (!existing)
+      return null;
+
+    // Same lock as createOverride, for the same reason: a removal must not
+    // land in the middle of a booking pricing itself.
+    await tx.select({ id: properties.id })
+      .from(properties)
+      .where(eq(properties.id, existing.propertyId))
+      .for("update");
+
+    const [row] = await tx.delete(propertyRateOverrides)
+      .where(eq(propertyRateOverrides.id, id))
+      .returning({ id: propertyRateOverrides.id });
+
+    return row ?? null;
+  });
 
   if (!removed) {
     return c.json(

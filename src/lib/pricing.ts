@@ -69,6 +69,16 @@ export function nightlyRate(
   return property.pricePerNightCents;
 }
 
+/**
+ * Longest stay the pricing code will expand night by night.
+ *
+ * `nightlyBreakdown` allocates one object per night, so an unbounded range is
+ * a denial of service on any endpoint that reaches it — a public quote for
+ * 2020 to 9999 is nearly three million objects and around 175MB of JSON. A
+ * year is far beyond any real short-term rental stay.
+ */
+export const MAX_STAY_NIGHTS = 365;
+
 export interface NightBreakdown {
   night: string;
   rateCents: number;
@@ -87,6 +97,12 @@ export function nightlyBreakdown(
 
   if (nights <= 0)
     throw new Error("Check-out must be after check-in");
+
+  // Backstop. Request schemas reject an over-long stay as a 422 before
+  // reaching here; this exists so a future caller that forgets cannot
+  // allocate its way through the heap.
+  if (nights > MAX_STAY_NIGHTS)
+    throw new Error(`Stay exceeds ${MAX_STAY_NIGHTS} nights`);
 
   const start = parseDate(checkIn);
 
