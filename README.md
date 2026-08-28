@@ -203,14 +203,32 @@ cannot work.
 
 ## Reconciliation
 
-`POST /admin/payments/reconcile` **does not run on a timer.** Nothing inside
-the API schedules it — point an external cron at it every few minutes before
-going live:
+Reconciliation **does not run on a timer** — schedule it yourself, every few
+minutes, before going live.
+
+Run it as a task from the same image. This is the form to schedule: the HTTP
+endpoint needs an admin session, which a cron job cannot obtain.
 
 ```sh
-*/5 * * * * curl -fsS -X POST https://your-api/admin/payments/reconcile \
-  -H "cookie: <admin session>"
+docker run --rm --env-file .env.production \
+  ghcr.io/mwakunin/hbserenity-api:sha-abc1234 \
+  node ./dist/src/tasks/reconcile.js
 ```
+
+With plain cron:
+
+```sh
+*/5 * * * * docker run --rm --env-file /srv/rentals/.env.production \
+  ghcr.io/mwakunin/hbserenity-api:latest node ./dist/src/tasks/reconcile.js
+```
+
+It exits non-zero on failure so the scheduler reports it, logs one JSON line
+per run, and is safe to run concurrently with itself and with live traffic.
+`POST /admin/payments/reconcile` remains for ad-hoc runs from the API docs.
+
+It matters twice over: it settles payments whose callback was lost, and it is
+the only thing that moves a finished stay to `completed` — without it nothing
+becomes reviewable.
 
 It exists because the payment flow deliberately fails closed: whenever it
 cannot prove what happened to a payment, it leaves the attempt pending rather
