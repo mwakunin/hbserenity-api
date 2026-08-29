@@ -260,11 +260,31 @@ describe("refunds", () => {
     });
   });
 
+  // The whole point of allowing a paid booking to be cancelled: the money does
+  // not move by itself, so it has to land somewhere a human will see it. Its
+  // own describe, because the attention-list block below pre-cancels the
+  // booking in beforeEach — this needs to do the cancelling itself.
+  describe("cancelling a paid booking through the API", () => {
+    it("puts the payment on the attention list for refund", async () => {
+      const res = await app.request(`/bookings/${bookingId}/cancel`, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...guest.headers },
+        body: JSON.stringify({ reason: "Travel plans changed" }),
+      });
+      expect(res.status).toBe(200);
+
+      const { data } = await (await attention()).json();
+      expect(data).toHaveLength(1);
+      expect(data[0].reason).toBe("paid_but_cancelled");
+      expect(data[0].amountCents).toBe(2_700_000);
+    });
+  });
+
   describe("the attention list", () => {
     beforeEach(async () => {
       // Money taken against a booking the guest cancelled — the case a refund
       // is meant to resolve.
-      await db.update(bookings).set({ status: "cancelled" }).where(eq(bookings.id, bookingId));
+      await db.update(bookings).set({ status: "cancelled", cancelledAt: new Date() }).where(eq(bookings.id, bookingId));
     });
 
     it("flags money held against a cancelled booking", async () => {
@@ -303,7 +323,12 @@ describe("refunds", () => {
     });
 
     it("stops flagging a possible duplicate charge once refunded", async () => {
-      await db.update(bookings).set({ status: "confirmed" }).where(eq(bookings.id, bookingId));
+      // Clearing cancelledAt alongside: a confirmed booking carrying a
+      // cancellation date is a state no code path produces, and the CHECK
+      // rejects it.
+      await db.update(bookings)
+        .set({ status: "confirmed", cancelledAt: null })
+        .where(eq(bookings.id, bookingId));
       await db.update(payments)
         .set({ resultDesc: "Prompt sent after the booking became 'confirmed' — possible duplicate charge, needs refund review" })
         .where(eq(payments.id, paymentId));

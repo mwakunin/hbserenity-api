@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 
 import db from "@/db";
 import { bookings, payments, properties, user } from "@/db/schema";
@@ -58,6 +58,7 @@ async function loadBookingContext(bookingId: string) {
     checkIn: bookings.checkIn,
     checkOut: bookings.checkOut,
     guestCount: bookings.guestCount,
+    cancellationReason: bookings.cancellationReason,
     totalAmountCents: bookings.totalAmountCents,
     currency: bookings.currency,
     guestName: user.name,
@@ -132,6 +133,64 @@ export async function notifyBookingConfirmed(
     // Swallowed on purpose. See the note at the top of this file: the payment
     // is already recorded, and failing here would undo or obscure that.
     log.error({ err, bookingId }, "Could not send the booking confirmation email");
+  }
+}
+
+/**
+ * Tell the guest their stay was called off.
+ *
+ * Sent whichever side cancelled: the guest gets written confirmation of their
+ * own decision, and if the host cancelled, this may be the first they hear of
+ * it.
+ *
+ * Where money was taken it says a refund is being arranged and stops there. It
+ * cannot promise an amount, because refunds are recorded by hand against
+ * whatever the host decides — a figure quoted here would be a commitment
+ * nothing in the system is bound to.
+ */
+export async function notifyBookingCancelled(
+  bookingId: string,
+  log: Logger,
+): Promise<void> {
+  try {
+    if (!emailDeliverable)
+      return;
+
+    const booking = await loadBookingContext(bookingId);
+    if (!booking || !isDeliverableEmail(booking.guestEmail))
+      return;
+
+    const [paid] = await db.select({ amountCents: payments.amountCents })
+      .from(payments)
+      .where(and(
+        eq(payments.bookingId, bookingId),
+        eq(payments.status, "success"),
+      ));
+
+    await sendEmail({
+      to: booking.guestEmail,
+      subject: `Your booking at ${booking.propertyTitle} has been cancelled`,
+      body: [
+        `Hi ${booking.guestName},`,
+        "",
+        `Your booking at ${booking.propertyTitle} for `
+        + `${formatDate(booking.checkIn)} to ${formatDate(booking.checkOut)} `
+        + `has been cancelled.`,
+        "",
+        `  Reference  ${booking.reference}`,
+        booking.cancellationReason ? `  Reason     ${booking.cancellationReason}` : null,
+        "",
+        paid
+          ? `You paid ${formatMoney(paid.amountCents, booking.currency)} for this stay. `
+          + `We are arranging your refund and will confirm once it has been sent.`
+          : `No payment was taken, so there is nothing to refund.`,
+        "",
+        "Reply to this email if anything looks wrong.",
+      ].filter(line => line !== null).join("\n"),
+    });
+  }
+  catch (err) {
+    log.error({ err, bookingId }, "Could not send the booking cancellation email");
   }
 }
 

@@ -173,7 +173,7 @@ describe("admin payment reconciliation", () => {
 
     it("does not resurrect a booking the guest cancelled", async () => {
       await pendingAttempt();
-      await db.update(bookings).set({ status: "cancelled" }).where(eq(bookings.id, bookingId));
+      await db.update(bookings).set({ status: "cancelled", cancelledAt: new Date() }).where(eq(bookings.id, bookingId));
       mockDaraja("0");
 
       await runSweep();
@@ -308,7 +308,7 @@ describe("admin payment reconciliation", () => {
 
     it("reports money received against a cancelled booking", async () => {
       await pendingAttempt({ status: "success" });
-      await db.update(bookings).set({ status: "cancelled" }).where(eq(bookings.id, bookingId));
+      await db.update(bookings).set({ status: "cancelled", cancelledAt: new Date() }).where(eq(bookings.id, bookingId));
 
       const { data } = await (await listAttention()).json();
       expect(data[0].reason).toBe("paid_but_cancelled");

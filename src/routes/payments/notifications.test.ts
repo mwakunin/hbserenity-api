@@ -164,7 +164,7 @@ describe("payment notifications", () => {
 
     // The guest cancels while the prompt is still on the handset.
     await db.update(bookings)
-      .set({ status: "cancelled" })
+      .set({ status: "cancelled", cancelledAt: new Date() })
       .where(eq(bookings.id, bookingId));
 
     sentEmails.length = 0;
@@ -274,6 +274,50 @@ describe("payment notifications", () => {
     finally {
       spy.mockRestore();
     }
+  });
+
+  describe("cancellation", () => {
+    const cancel = (id: string, body: object) =>
+      app.request(`/bookings/${id}/cancel`, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...guest.headers },
+        body: JSON.stringify(body),
+      });
+
+    it("tells the guest, and says a refund is coming when they paid", async () => {
+      await payAndConfirm();
+      sentEmails.length = 0;
+
+      expect((await cancel(bookingId, { reason: "Plans changed" })).status).toBe(200);
+
+      const mail = sentEmails.find(m => /cancelled/i.test(m.subject));
+      expect(mail).toBeDefined();
+      expect(mail!.body).toMatch(/Plans changed/);
+      expect(mail!.body).toMatch(/arranging your refund/i);
+      // Never a figure: refunds are recorded by hand, so a number here would
+      // be a promise nothing is bound to.
+      expect(mail!.body).toMatch(/KES 27,000/);
+    });
+
+    it("says there is nothing to refund when no payment was taken", async () => {
+      const created = await app.request("/bookings", {
+        method: "POST",
+        headers: { "content-type": "application/json", ...guest.headers },
+        body: JSON.stringify({
+          propertyId,
+          checkIn: dayFromNow(50),
+          checkOut: dayFromNow(53),
+          guestCount: 2,
+        }),
+      });
+      const booking = await created.json();
+      sentEmails.length = 0;
+
+      expect((await cancel(booking.id, {})).status).toBe(200);
+
+      const mail = sentEmails.find(m => /cancelled/i.test(m.subject));
+      expect(mail!.body).toMatch(/nothing to refund/i);
+    });
   });
 
   it("sends nothing at all for a failed payment", async () => {

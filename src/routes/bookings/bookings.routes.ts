@@ -10,6 +10,7 @@ import { rateLimits } from "@/middlewares/rate-limit";
 import {
   availabilityQuerySchema,
   availabilityResponseSchema,
+  cancelBookingSchema,
   createBlackoutSchema,
   createBookingSchema,
   listBookingsQuerySchema,
@@ -129,11 +130,17 @@ export const cancel = createRoute({
   tags,
   summary: "Cancel a booking",
   description:
-    "Only a booking still in pending_payment may be cancelled, per the "
-    + "status lifecycle. Cancelling frees the dates for another guest.",
+    "A booking may be cancelled while it still holds its dates — "
+    + "pending_payment or confirmed — by the guest who made it or by an "
+    + "admin. Cancelling frees the dates for another guest immediately. A "
+    + "stay that has already begun cannot be cancelled.\n\n"
+    + "Cancelling a paid booking requires a reason, and does NOT move money: "
+    + "the payment then shows on GET /admin/payments/attention as money held "
+    + "against a cancelled booking, and the refund is recorded by hand.",
   middleware: [requireAuth, rateLimits.write()],
   request: {
     params: IdUUIDParamsSchema,
+    body: jsonContent(cancelBookingSchema, "Why, if it was paid for"),
   },
   responses: {
     [HttpStatusCodes.TOO_MANY_REQUESTS]: jsonContent(
@@ -146,11 +153,11 @@ export const cancel = createRoute({
     [HttpStatusCodes.NOT_FOUND]: jsonContent(notFoundSchema, "Booking not found"),
     [HttpStatusCodes.CONFLICT]: jsonContent(
       conflictSchema,
-      "This booking can no longer be cancelled",
+      "Already cancelled or completed, or the stay has begun",
     ),
     [HttpStatusCodes.UNPROCESSABLE_ENTITY]: jsonContent(
-      createErrorSchema(IdUUIDParamsSchema),
-      "Invalid id",
+      createErrorSchema(cancelBookingSchema),
+      "Invalid id, or no reason given for a paid booking",
     ),
   },
 });

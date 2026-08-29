@@ -284,7 +284,9 @@ describe("payments routes", () => {
     it.each(["confirmed", "cancelled", "completed"] as const)(
       "409s paying a booking that is already %s",
       async (status) => {
-        await db.update(bookings).set({ status }).where(eq(bookings.id, bookingId));
+        await db.update(bookings)
+          .set({ status, cancelledAt: status === "cancelled" ? new Date() : null })
+          .where(eq(bookings.id, bookingId));
         const res = await pay(guest);
         expect(res.status).toBe(409);
       },
@@ -429,7 +431,7 @@ describe("payments routes", () => {
     it("does not resurrect a booking cancelled while payment was in flight", async () => {
       await startPayment();
       await db.update(bookings)
-        .set({ status: "cancelled" })
+        .set({ status: "cancelled", cancelledAt: new Date() })
         .where(eq(bookings.id, bookingId));
 
       mockFetch(jsonResponse(TOKEN), jsonResponse({ ResultCode: "0", ResultDesc: "ok" }));

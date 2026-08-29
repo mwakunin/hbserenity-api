@@ -316,6 +316,22 @@ export const bookings = pgTable(
     totalAmountCents: integer("total_amount_cents").notNull(),
     currency: text("currency").notNull().default("KES"),
 
+    /**
+     * Why the stay ended before it happened.
+     *
+     * A cancelled booking with no trail is unarguable after the fact: a guest
+     * and a host who each remember it differently have nothing to check, and a
+     * paid cancellation is exactly when that dispute is worth money. `cancelledBy`
+     * records which side did it, which is the part that actually settles the
+     * argument.
+     */
+    cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
+    cancellationReason: text("cancellation_reason"),
+    // text, not uuid — user.id is text. See the note in auth-schema.ts.
+    // set null rather than cascade: losing the account must not erase the
+    // record that the booking was cancelled.
+    cancelledBy: text("cancelled_by").references(() => user.id, { onDelete: "set null" }),
+
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -325,6 +341,18 @@ export const bookings = pgTable(
     index("bookings_dates_idx").on(table.checkIn, table.checkOut),
     check("bookings_dates_valid", sql`${table.checkOut} > ${table.checkIn}`),
     check("bookings_guest_count_positive", sql`${table.guestCount} > 0`),
+    /**
+     * The timestamp and the status cannot disagree.
+     *
+     * Without this a row can be `cancelled` with no record of when, or carry a
+     * cancellation date while still being live — and the attention list, which
+     * pairs a successful payment with a cancelled booking, would be reading a
+     * state nobody can date.
+     */
+    check(
+      "bookings_cancelled_at_matches_status",
+      sql`(${table.status} = 'cancelled') = (${table.cancelledAt} IS NOT NULL)`,
+    ),
     wholeShillings("bookings_total_amount_whole", table.totalAmountCents),
     // NOTE: the real double-booking guard is an EXCLUDE USING gist constraint
     // that drizzle-kit cannot express. It lives in a hand-written migration —
