@@ -64,6 +64,42 @@ describe("the OpenAPI document", () => {
     expect(names).toEqual(expect.arrayContaining(["id", "checkIn", "checkOut"]));
   });
 
+  /**
+   * The composed case, which is the one the cast is actually awkward about.
+   *
+   * The assertion below covers a plain pass-through — drizzle-zod output
+   * wrapped and nothing else. `propertyWithImagesSchema` instead `.extend()`s
+   * that output with `zod/v4` arrays and objects before wrapping, which is why
+   * CLAUDE.md insists composition happens *before* `toZodV4SchemaTyped`: the
+   * cast throws `.shape` away. A regression confined to that mixture would
+   * degrade the documented `GET /properties/{id}` response — the main public
+   * listing detail — while every other assertion here stayed green.
+   */
+  it("renders a schema that mixes drizzle-zod output with hand-written zod", async () => {
+    const spec = await (await app.request("/doc")).json();
+    const schema = spec.paths["/properties/{id}"].get
+      .responses["200"]
+      .content["application/json"]
+      .schema;
+
+    // The table half survived the extend.
+    expect(Object.keys(schema.properties ?? {})).toEqual(
+      expect.arrayContaining(["id", "title", "pricePerNightCents", "images", "amenities"]),
+    );
+
+    // A nested drizzle-zod schema, not collapsed to an untyped array.
+    expect(schema.properties.images.type).toBe("array");
+    expect(Object.keys(schema.properties.images.items?.properties ?? {})).toEqual(
+      expect.arrayContaining(["id", "url", "fileId", "isCover"]),
+    );
+
+    // And the hand-written zod/v4 half beside it.
+    expect(schema.properties.amenities.type).toBe("array");
+    expect(Object.keys(schema.properties.amenities.items?.properties ?? {})).toEqual(
+      expect.arrayContaining(["id", "name", "icon"]),
+    );
+  });
+
   // Derived from drizzle-zod, so this is the path that actually crosses the
   // cast: a table definition turned into a response schema.
   it("renders a response schema derived from a table", async () => {
