@@ -61,13 +61,49 @@ function checkViolationBody(err: unknown) {
   };
 }
 
+/**
+ * The one photo that represents a listing.
+ *
+ * `property_images_one_cover_idx` guarantees at most one cover per property,
+ * but not that there is one — a host can upload photos and never pick. Falling
+ * back to the lowest `order` means a listing with pictures always shows one,
+ * rather than looking photoless because nobody pressed a button.
+ */
+function coverOf<T extends { isCover: boolean; order: number }>(images: T[]): T | null {
+  if (images.length === 0)
+    return null;
+
+  return images.find(image => image.isCover)
+    ?? [...images].sort((a, b) => a.order - b.order)[0];
+}
+
 export const list: AppRouteHandler<ListRoute> = async (c) => {
-  const { county, town, propertyType, minGuests, maxPriceCents, page, limit }
+  const { county, town, propertyType, minGuests, maxPriceCents, status, page, limit }
     = c.req.valid("query");
 
-  // Only ever expose active listings publicly — drafts and deactivated
-  // properties must not leak through the browse endpoint.
-  const filters = [eq(properties.status, "active")];
+  const isAdmin = c.var.user?.role === "admin";
+
+  /*
+   * "active" is an unconditional floor for anyone who is not an admin.
+   *
+   * Written this way round on purpose: the branch that widens the filter is
+   * the exception, so a mistake in it leaves the public endpoint too strict
+   * rather than leaking a draft. `status` is simply ignored for a non-admin —
+   * refusing it would confirm that other statuses exist, and there is nothing
+   * a guest could legitimately do with the answer.
+   *
+   * The default stays "active" even for an admin, so browsing the site as one
+   * shows the same listings a guest sees. Seeing drafts is opt-in.
+   */
+  const filters = [];
+
+  if (isAdmin && status) {
+    if (status !== "all")
+      filters.push(eq(properties.status, status));
+  }
+  else {
+    filters.push(eq(properties.status, "active"));
+  }
 
   if (county)
     filters.push(eq(properties.county, county));
@@ -80,15 +116,26 @@ export const list: AppRouteHandler<ListRoute> = async (c) => {
   if (maxPriceCents !== undefined)
     filters.push(lte(properties.pricePerNightCents, maxPriceCents));
 
-  const where = and(...filters);
+  const where = filters.length > 0 ? and(...filters) : undefined;
 
   const [rows, [{ total }]] = await Promise.all([
-    db.select().from(properties).where(where).limit(limit).offset((page - 1) * limit).orderBy(properties.createdAt),
+    // `with` is a second query, not a join, so a property is still one row —
+    // no fan-out to collapse and no duplicated listing in the page.
+    db.query.properties.findMany({
+      where,
+      with: { images: true },
+      limit,
+      offset: (page - 1) * limit,
+      orderBy: properties.createdAt,
+    }),
     db.select({ total: count() }).from(properties).where(where),
   ]);
 
   return c.json({
-    data: rows,
+    data: rows.map(({ images, ...property }) => ({
+      ...property,
+      coverImage: coverOf(images),
+    })),
     meta: {
       page,
       limit,

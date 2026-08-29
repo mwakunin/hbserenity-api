@@ -95,6 +95,17 @@ export const listPropertiesQuerySchema = z.object({
     .optional(),
   minGuests: z.coerce.number().int().positive().optional().openapi({ example: 4 }),
   maxPriceCents: z.coerce.number().int().nonnegative().optional(),
+  /**
+   * Admin only, and ignored for everyone else.
+   *
+   * The public browse endpoint must never expose a draft, so "active" stays
+   * an unconditional floor for a non-admin rather than something a role check
+   * has to get right on every path. An admin may widen it; nobody else can.
+   */
+  status: z
+    .enum(["draft", "active", "inactive", "all"])
+    .optional()
+    .openapi({ example: "all" }),
   page: z.coerce.number().int().positive().default(1),
   limit: z.coerce.number().int().positive().max(100).default(20),
 });
@@ -110,8 +121,25 @@ export const propertyWithImagesSchema = toZodV4SchemaTyped(
   }),
 );
 
+/**
+ * A listing as it appears in a list, plus its cover photo.
+ *
+ * Only the cover, not the whole gallery: a host can upload any number of
+ * photos, so embedding all of them would make the size of this response depend
+ * on how many pictures someone happened to add. The full set stays on
+ * `GET /properties/{id}`, which is where a gallery is actually rendered.
+ *
+ * Composed before `toZodV4SchemaTyped` because the wrapper casts `.shape`
+ * away — see the note on that helper.
+ */
+export const propertyListItemSchema = toZodV4SchemaTyped(
+  rawSelectProperty.extend({
+    coverImage: rawSelectPropertyImage.nullable(),
+  }),
+);
+
 export const listPropertiesResponseSchema = z.object({
-  data: z.array(selectPropertySchema),
+  data: z.array(propertyListItemSchema),
   meta: z.object({
     page: z.number().int(),
     limit: z.number().int(),

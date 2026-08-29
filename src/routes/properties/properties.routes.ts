@@ -31,8 +31,14 @@ export const list = createRoute({
   tags,
   summary: "Browse active listings",
   description:
-    "Public. Only returns properties with status 'active' — drafts and "
-    + "deactivated listings are never exposed here.",
+    "Public. Returns properties with status 'active' — drafts and deactivated "
+    + "listings are never exposed to a guest, and the `status` filter is "
+    + "ignored for anyone who is not an admin.\n\n"
+    + "An admin may pass `status` (including `all`) to see their own drafts; "
+    + "the default is still 'active', so browsing as an admin shows what a "
+    + "guest sees.\n\n"
+    + "Each listing carries its `coverImage` so a grid can show photos without "
+    + "a request per card. The full gallery stays on `GET /properties/{id}`.",
   middleware: [rateLimits.read()],
   request: {
     query: listPropertiesQuerySchema,

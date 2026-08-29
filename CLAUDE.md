@@ -311,6 +311,31 @@ Non-default dev ports are deliberate: another project on this machine binds
   `sentEmails` rather than calling Resend, so senders must still run or the
   tests assert nothing.
 
+- **The browse list carries a cover photo, and only a cover.** `GET
+  /properties` returns `coverImage` per listing so a grid needs no request per
+  card; the full gallery stays on `GET /properties/{id}`. A host can upload any
+  number of photos, and the size of a list response must not depend on that.
+  `coverOf()` falls back to the lowest `order` when nobody set a cover — a
+  listing with pictures should never look photoless because a button was never
+  pressed.
+
+  `with: { images: true }` is a second query rather than a join, so a listing
+  with many photos is still one row in the page. A join would fan out and
+  repeat the listing.
+
+- **`status` on the browse list is admin-only, and "active" is an
+  unconditional floor.** The branch that widens the filter is the exception, so
+  a mistake there leaves the endpoint too strict rather than leaking a draft.
+  For a non-admin the parameter is **ignored** rather than refused: rejecting
+  it would confirm that other statuses exist, and there is nothing a guest
+  could do with the answer.
+
+  The default stays `active` even for an admin, so browsing the site as one
+  shows what a guest sees. Seeing drafts is opt-in — `?status=all`, or a
+  specific status. This matters because `properties.status` defaults to
+  `draft`: without it, a listing you create appears in no list at all and its
+  id is the only way back.
+
 - **Photos are uploaded by the client, straight to ImageKit.** The API only
   signs the request (`POST /properties/{id}/images/upload-auth`, admin-only,
   five-minute expiry) and records the result. Proxying the bytes would put

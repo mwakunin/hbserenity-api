@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import app from "@/app";
 import db from "@/db";
-import { bookings } from "@/db/schema";
+import { bookings, propertyImages } from "@/db/schema";
 import { dayFromNow, makeProperty, nextPhone, resetDb, signIn } from "@/test/helpers";
 
 function validPropertyBody(overrides: Record<string, unknown> = {}) {
@@ -256,6 +256,128 @@ describe("properties routes", () => {
       expect(meta.total).toBe(1);
       expect(data).toHaveLength(1);
       expect(data[0].title).toBe("Active one");
+    });
+
+    // A host could create a listing and then find it in no list at all — the
+    // id was the only way back to it.
+    it("lets an admin see their own drafts, without changing what a guest sees", async () => {
+      const admin = await signIn(nextPhone(), "admin");
+      await makeProperty(admin.id, { title: "Active one", status: "active" });
+      await makeProperty(admin.id, { title: "Draft one", status: "draft" });
+
+      const asGuest = await (await app.request("/properties")).json();
+      expect(asGuest.data.map((p: { title: string }) => p.title)).toEqual(["Active one"]);
+
+      // Default is unchanged for an admin too: seeing drafts is opt-in, so
+      // browsing the site as one shows the same listings a guest gets.
+      const adminDefault = await (await app.request("/properties", { headers: admin.headers })).json();
+      expect(adminDefault.data.map((p: { title: string }) => p.title)).toEqual(["Active one"]);
+
+      const all = await (await app.request("/properties?status=all", { headers: admin.headers })).json();
+      expect(all.data.map((p: { title: string }) => p.title).sort()).toEqual(["Active one", "Draft one"]);
+
+      const drafts = await (await app.request("/properties?status=draft", { headers: admin.headers })).json();
+      expect(drafts.data.map((p: { title: string }) => p.title)).toEqual(["Draft one"]);
+    });
+
+    // The floor is unconditional: widening is the exception, so a mistake
+    // leaves the public list too strict rather than leaking a draft.
+    it.each(["all", "draft", "inactive"])(
+      "ignores status=%s from a guest rather than honouring it",
+      async (status) => {
+        const admin = await signIn(nextPhone(), "admin");
+        const guest = await signIn(nextPhone());
+        await makeProperty(admin.id, { title: "Active one", status: "active" });
+        await makeProperty(admin.id, { title: "Draft one", status: "draft" });
+
+        for (const headers of [undefined, guest.headers]) {
+          const res = await app.request(`/properties?status=${status}`, headers ? { headers } : undefined);
+          const { data } = await res.json();
+          expect(data.map((p: { title: string }) => p.title)).toEqual(["Active one"]);
+        }
+      },
+    );
+
+    // Without this the browse grid has no photos: the only way to get one was
+    // a request per listing.
+    describe("cover image", () => {
+      it("carries the cover so a grid needs no request per card", async () => {
+        const admin = await signIn(nextPhone(), "admin");
+        const property = await makeProperty(admin.id);
+
+        await db.insert(propertyImages).values([
+          { propertyId: property.id, url: "https://cdn.test/b.jpg", fileId: "b", order: 1, isCover: false },
+          { propertyId: property.id, url: "https://cdn.test/a.jpg", fileId: "a", order: 2, isCover: true },
+        ]);
+
+        const { data } = await (await app.request("/properties")).json();
+        expect(data[0].coverImage.url).toBe("https://cdn.test/a.jpg");
+      });
+
+      // A host can upload photos and never pick one. Falling back means the
+      // listing still shows a picture rather than looking photoless.
+      it("falls back to the lowest order when no cover is set", async () => {
+        const admin = await signIn(nextPhone(), "admin");
+        const property = await makeProperty(admin.id);
+
+        await db.insert(propertyImages).values([
+          { propertyId: property.id, url: "https://cdn.test/second.jpg", fileId: "s", order: 5, isCover: false },
+          { propertyId: property.id, url: "https://cdn.test/first.jpg", fileId: "f", order: 1, isCover: false },
+        ]);
+
+        const { data } = await (await app.request("/properties")).json();
+        expect(data[0].coverImage.url).toBe("https://cdn.test/first.jpg");
+      });
+
+      it("is null for a listing with no photos", async () => {
+        const admin = await signIn(nextPhone(), "admin");
+        await makeProperty(admin.id);
+
+        const { data } = await (await app.request("/properties")).json();
+        expect(data[0].coverImage).toBeNull();
+      });
+
+      // Only the cover, not the gallery: a host can upload any number of
+      // photos, and the size of this response must not depend on that.
+      it("carries one image, not the whole gallery", async () => {
+        const admin = await signIn(nextPhone(), "admin");
+        const property = await makeProperty(admin.id);
+
+        await db.insert(propertyImages).values(
+          Array.from({ length: 5 }, (_, i) => ({
+            propertyId: property.id,
+            url: `https://cdn.test/${i}.jpg`,
+            fileId: `f${i}`,
+            order: i,
+            isCover: i === 0,
+          })),
+        );
+
+        const { data } = await (await app.request("/properties")).json();
+        expect(data[0].coverImage.url).toBe("https://cdn.test/0.jpg");
+        expect(data[0].images).toBeUndefined();
+      });
+
+      // `with` is a second query rather than a join, so a listing with many
+      // photos must still be one row in the page.
+      it("does not duplicate a listing that has several photos", async () => {
+        const admin = await signIn(nextPhone(), "admin");
+        const property = await makeProperty(admin.id);
+
+        await db.insert(propertyImages).values(
+          Array.from({ length: 4 }, (_, i) => ({
+            propertyId: property.id,
+            url: `https://cdn.test/${i}.jpg`,
+            fileId: `dup${i}`,
+            order: i,
+            isCover: false,
+          })),
+        );
+
+        const { data, meta } = await (await app.request("/properties")).json();
+        expect(data).toHaveLength(1);
+        expect(meta.total).toBe(1);
+      });
     });
 
     it("404s a draft property for an anonymous visitor", async () => {
