@@ -93,3 +93,16 @@ export const createBlackoutSchema = z.object({
   b => b.endDate > b.startDate,
   { message: "End date must be after start date", path: ["endDate"] },
 );
+
+/**
+ * Why a booking is being called off.
+ *
+ * Optional here because an unpaid hold needs no justification. The handler
+ * requires it once money has been taken — a rule Zod cannot express, since the
+ * body does not say what the booking's status is.
+ */
+export const cancelBookingSchema = z.object({
+  reason: z.string().trim().min(1).max(500).optional().openapi({
+    example: "Guest's travel plans changed",
+  }),
+});

@@ -6,7 +6,9 @@ import type { AppRouteHandler } from "@/lib/types";
 
 import db from "@/db";
 import { bookings, properties, propertyBlackouts, propertyRateOverrides } from "@/db/schema";
+import { todayInBusinessZone } from "@/lib/dates";
 import { isExclusionViolation } from "@/lib/db-errors";
+import { notifyBookingCancelled } from "@/lib/notifications";
 import { calculateBookingTotal } from "@/lib/pricing";
 
 import type {
@@ -18,7 +20,11 @@ import type {
   ListRoute,
 } from "./bookings.routes";
 
-/** Booking statuses that actually hold dates against other guests. */
+/**
+ * Booking statuses that actually hold dates against other guests — and so
+ * exactly the ones that can still be called off. A booking that holds nothing
+ * has either already happened or was cancelled once already.
+ */
 const HOLDING_STATUSES = ["pending_payment", "confirmed"] as const;
 
 // Postgres raises 23P01 when an EXCLUDE constraint is violated — that's the
@@ -237,6 +243,9 @@ export const getOne: AppRouteHandler<GetOneRoute> = async (c) => {
 
 export const cancel: AppRouteHandler<CancelRoute> = async (c) => {
   const { id } = c.req.valid("param");
+  // The body is optional: cancelling an unpaid hold needs no explanation, so
+  // a bare POST is valid and arrives here as undefined.
+  const { reason } = c.req.valid("json") ?? {};
   const user = c.var.user!;
 
   const [booking] = await db.select().from(bookings).where(eq(bookings.id, id));
@@ -248,25 +257,69 @@ export const cancel: AppRouteHandler<CancelRoute> = async (c) => {
     );
   }
 
-  // Lifecycle: pending_payment -> cancelled is the only legal cancellation.
-  if (booking.status !== "pending_payment") {
+  // A stay that is already paid for can still be called off — plans change on
+  // both sides. `completed` cannot: that stay happened.
+  if (!HOLDING_STATUSES.includes(booking.status as typeof HOLDING_STATUSES[number])) {
     return c.json(
       { message: `A booking with status '${booking.status}' can no longer be cancelled` },
       HttpStatusCodes.CONFLICT,
     );
   }
 
+  // Once the guest is due to arrive there is nothing left to cancel. Allowing
+  // it would also free nights that have already been slept in, and drop the
+  // booking out of the sweep that makes a finished stay reviewable.
+  if (booking.checkIn <= todayInBusinessZone()) {
+    return c.json(
+      { message: "This stay has already begun and can no longer be cancelled" },
+      HttpStatusCodes.CONFLICT,
+    );
+  }
+
+  // Calling off a stay someone has paid for is the case that gets disputed
+  // later, so it does not go on the record unexplained. An unpaid hold is
+  // nobody's loss and needs no justification.
+  if (booking.status === "confirmed" && !reason) {
+    return c.json(
+      {
+        success: false,
+        error: {
+          issues: [{
+            code: "custom",
+            path: ["reason"],
+            message: "A reason is required to cancel a booking that has been paid for",
+          }],
+          name: "ZodError",
+        },
+      },
+      HttpStatusCodes.UNPROCESSABLE_ENTITY,
+    );
+  }
+
+  // Guarded on the status this call actually validated, not merely on "still
+  // cancellable": a booking confirmed between the read and the write would
+  // otherwise be cancelled under the unpaid rules, with no reason recorded.
   const [cancelled] = await db.update(bookings)
-    .set({ status: "cancelled" })
-    .where(and(eq(bookings.id, id), eq(bookings.status, "pending_payment")))
+    .set({
+      status: "cancelled",
+      cancelledAt: new Date(),
+      cancellationReason: reason ?? null,
+      cancelledBy: user.id,
+    })
+    .where(and(eq(bookings.id, id), eq(bookings.status, booking.status)))
     .returning();
 
   if (!cancelled) {
     return c.json(
-      { message: "This booking can no longer be cancelled" },
+      { message: "This booking changed while being cancelled; try again" },
       HttpStatusCodes.CONFLICT,
     );
   }
+
+  // Money already taken is not returned here — refunds are recorded by hand.
+  // A successful payment against a cancelled booking is what puts it on
+  // GET /admin/payments/attention, which is where the refund gets decided.
+  await notifyBookingCancelled(cancelled.id, c.var.logger);
 
   return c.json(cancelled, HttpStatusCodes.OK);
 };

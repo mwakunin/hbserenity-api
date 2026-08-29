@@ -97,7 +97,8 @@ Non-default dev ports are deliberate: another project on this machine binds
   constraint, or the caller gets a generic message.
 
 - **Booking status lifecycle**: `pending_payment → confirmed → completed`,
-  or `→ cancelled` from `pending_payment`. The last step is applied by
+  with `→ cancelled` from **either** `pending_payment` or `confirmed`. The
+  completion step is applied by
   `completePastStays()` in the reconciliation sweep once check-out has passed
   — nothing else advances a booking, so without that sweep running no stay
   ever becomes reviewable. Don't add new statuses without
@@ -344,6 +345,55 @@ Non-default dev ports are deliberate: another project on this machine binds
   `property_images_one_cover_idx`. Two covers has no defined answer, and a
   check-then-update cannot prevent it — both requests read "no other cover".
   The handlers clear then set for the ordinary case and map `23505` to 409.
+
+- **A paid booking can be cancelled, and cancelling never moves money.**
+  Plans change on both sides, so `confirmed → cancelled` is allowed for the
+  guest who booked and for an admin. The nights go back on sale immediately —
+  the overlap constraint's `WHERE` lists only `pending_payment` and
+  `confirmed`, so a cancelled row stops holding dates with no extra work.
+
+  What it does **not** do is refund anything. A successful payment against a
+  cancelled booking is precisely the `paid_but_cancelled` case on
+  `GET /admin/payments/attention`, and the refund is recorded by hand from
+  there. The cancellation email says a refund is being arranged and quotes no
+  figure, because nothing in the system is bound to one.
+
+  Two rules make the record worth having. A stay that has **already begun**
+  cannot be cancelled — it would free nights already slept in and drop the
+  booking out of the sweep that makes a finished stay reviewable. And
+  cancelling a **paid** stay requires a reason; an unpaid hold does not, since
+  it costs nobody anything. That distinction cannot live in Zod, which sees
+  only the body and not the booking's status, so the handler enforces it.
+
+  `cancelledAt`, `cancellationReason` and `cancelledBy` are the trail.
+  `cancelledBy` is the part that settles an argument later — guest or host —
+  and is `set null` on user deletion rather than cascading, so losing the
+  account does not erase the fact that the booking was cancelled. The CHECK
+  `bookings_cancelled_at_matches_status` keeps the status and the timestamp
+  from disagreeing in either direction.
+
+  "What day is it" comes from `todayInBusinessZone()` in `lib/dates.ts`,
+  shared with `completePastStays()`. Reconciliation deciding a stay is over and
+  this handler deciding a stay has begun must not disagree about the date. It
+  answers in **Nairobi's** calendar day, not UTC: booking dates mean local days,
+  and Kenya being UTC+3 means a UTC reading reports yesterday for the first
+  three hours of each Kenyan day — long enough for the begun-stay guard to let
+  a cancellation through on the arrival date itself.
+
+  The cancellation email reads every attempt for the booking in **one**
+  statement and classifies them in memory. Asking twice — once for successful
+  attempts, once for unresolved ones — gives each query its own snapshot, and
+  settlement commits in the gap: an attempt that is `pending` for the first
+  query and `success` for the second is counted by neither, and the guest is
+  told nothing was taken. A test counts the reads, because re-splitting them
+  reintroduces exactly that.
+
+  It never claims nothing was taken while an attempt is
+  still resolvable. Cancelling does not retract a prompt already on the guest's
+  handset, so a charge can still land afterwards; telling them there is nothing
+  to refund would stop them chasing money they are owed. It also sums **every**
+  successful attempt — `payments_one_pending_per_booking` constrains only
+  pending rows, so the duplicate-charge path can leave two.
 
 - **Booking price snapshot**: `bookings.totalAmountCents` is fixed at
   creation time and must never be recalculated from the property's current
@@ -672,8 +722,6 @@ Deliberately deferred — don't assume these exist:
 - **Partial deposits.** A payment is all-or-nothing against
   `bookings.totalAmountCents`, though 50%-now-balance-later is common
   locally.
-- **Cancellation metadata** — no `cancelledAt` and no reason. Refunds
-  themselves are recorded; what is missing is why the booking ended.
 - **A booking idempotency key**, so a double-tapped "Book now" can create two
   bookings for different dates. The same dates are already impossible — the
   overlap constraint sees to that.

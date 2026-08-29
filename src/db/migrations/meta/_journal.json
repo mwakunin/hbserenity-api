@@ -99,6 +99,13 @@
       "when": 1787942249301,
       "tag": "0013_property_image_file_id",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1787985867973,
+      "tag": "0014_booking_cancellation_trail",
+      "breakpoints": true
     }
   ]
 }

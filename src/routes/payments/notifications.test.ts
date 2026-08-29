@@ -4,10 +4,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TestUser } from "@/test/helpers";
 
 import app from "@/app";
-import db from "@/db";
+import db, { pool } from "@/db";
 import { bookings, payments } from "@/db/schema";
 import { sentEmails } from "@/lib/email";
 import { resetTokenCache } from "@/lib/mpesa";
+import { notifyBookingCancelled } from "@/lib/notifications";
 import {
   dayFromNow,
   makeProperty,
@@ -164,7 +165,7 @@ describe("payment notifications", () => {
 
     // The guest cancels while the prompt is still on the handset.
     await db.update(bookings)
-      .set({ status: "cancelled" })
+      .set({ status: "cancelled", cancelledAt: new Date() })
       .where(eq(bookings.id, bookingId));
 
     sentEmails.length = 0;
@@ -274,6 +275,166 @@ describe("payment notifications", () => {
     finally {
       spy.mockRestore();
     }
+  });
+
+  describe("cancellation", () => {
+    const cancel = (id: string, body: object) =>
+      app.request(`/bookings/${id}/cancel`, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...guest.headers },
+        body: JSON.stringify(body),
+      });
+
+    it("tells the guest, and says a refund is coming when they paid", async () => {
+      await payAndConfirm();
+      sentEmails.length = 0;
+
+      expect((await cancel(bookingId, { reason: "Plans changed" })).status).toBe(200);
+
+      const mail = sentEmails.find(m => /cancelled/i.test(m.subject));
+      expect(mail).toBeDefined();
+      expect(mail!.body).toMatch(/Plans changed/);
+      expect(mail!.body).toMatch(/arranging your refund/i);
+      // Never a figure: refunds are recorded by hand, so a number here would
+      // be a promise nothing is bound to.
+      expect(mail!.body).toMatch(/KES 27,000/);
+    });
+
+    // Cancelling does not retract a prompt already on the guest's handset. If
+    // the callback lands afterwards the charge is real, so promising there is
+    // nothing to refund would tell them not to chase money they are owed.
+    it("does not claim nothing was taken while a payment is still in flight", async () => {
+      mockFetch(jsonResponse(TOKEN), jsonResponse(PUSH_OK));
+      await app.request(`/bookings/${bookingId}/pay`, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...guest.headers },
+        body: JSON.stringify({ phoneNumber: "0712345678" }),
+      });
+      sentEmails.length = 0;
+
+      // Cancelled with the prompt still unanswered.
+      expect((await cancel(bookingId, {})).status).toBe(200);
+
+      const mail = sentEmails.find(m => /cancelled/i.test(m.subject));
+      expect(mail!.body).not.toMatch(/nothing to refund/i);
+      expect(mail!.body).toMatch(/had not finished/i);
+
+      // And the charge really can still arrive afterwards.
+      await app.request("/mpesa/callback", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(successCallback("ws_CO_notify_1", totalCents / 100)),
+      });
+      const [p] = await db.select().from(payments).where(eq(payments.bookingId, bookingId));
+      expect(p.status).toBe("success");
+    });
+
+    // payments_one_pending_per_booking constrains only pending rows, so a
+    // booking can hold two successful charges — that is what the duplicate
+    // charge path on the attention list is for.
+    it("totals every successful charge, not just the first", async () => {
+      await payAndConfirm();
+
+      // A second prompt answered after the booking was already settled.
+      await db.insert(payments).values({
+        bookingId,
+        phoneNumber: "+254712345678",
+        amountCents: totalCents,
+        status: "success",
+        checkoutRequestId: "ws_CO_notify_dup",
+        pushDispatchedAt: new Date(),
+      });
+      sentEmails.length = 0;
+
+      expect((await cancel(bookingId, { reason: "Double charged" })).status).toBe(200);
+
+      const mail = sentEmails.find(m => /cancelled/i.test(m.subject));
+      // Both attempts: KES 27,000 each.
+      expect(mail!.body).toMatch(/KES 54,000/);
+    });
+
+    // Whatever state the single attempt is in, the email has to describe it
+    // correctly — and must only claim nothing was taken when nothing can still
+    // settle.
+    it.each([
+      ["pending", /had not finished/i],
+      ["timeout", /had not finished/i],
+      ["success", /arranging your refund/i],
+      ["failed", /nothing to refund/i],
+    ] as const)("describes an attempt that is %s", async (status, expected) => {
+      const created = await app.request("/bookings", {
+        method: "POST",
+        headers: { "content-type": "application/json", ...guest.headers },
+        body: JSON.stringify({
+          propertyId,
+          checkIn: dayFromNow(70),
+          checkOut: dayFromNow(73),
+          guestCount: 2,
+        }),
+      });
+      const booking = await created.json();
+
+      await db.insert(payments).values({
+        bookingId: booking.id,
+        phoneNumber: "+254712345678",
+        amountCents: booking.totalAmountCents,
+        status,
+        checkoutRequestId: `ws_CO_state_${status}`,
+        pushDispatchedAt: new Date(),
+      });
+      sentEmails.length = 0;
+
+      expect((await cancel(booking.id, { reason: "Testing" })).status).toBe(200);
+
+      const mail = sentEmails.find(m => /cancelled/i.test(m.subject));
+      expect(mail!.body).toMatch(expected);
+    });
+
+    // The states are read in ONE statement. Split across two, settlement
+    // commits in the gap: an attempt that is pending for the first query and
+    // success for the second is counted by neither, and the guest is told
+    // nothing was taken while the charge stands against their cancelled
+    // booking. Counting the reads is what stops that being reintroduced.
+    it("reads every attempt in a single query, leaving no gap to settle in", async () => {
+      await payAndConfirm();
+
+      const spy = vi.spyOn(pool, "query");
+      try {
+        await notifyBookingCancelled(bookingId, {
+          info: () => {},
+          error: () => {},
+        });
+
+        const paymentReads = spy.mock.calls
+          .map(call => (typeof call[0] === "string" ? call[0] : (call[0] as { text?: string })?.text ?? ""))
+          .filter(text => /from "payments"/i.test(text));
+
+        expect(paymentReads).toHaveLength(1);
+      }
+      finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("says there is nothing to refund when no payment was taken", async () => {
+      const created = await app.request("/bookings", {
+        method: "POST",
+        headers: { "content-type": "application/json", ...guest.headers },
+        body: JSON.stringify({
+          propertyId,
+          checkIn: dayFromNow(50),
+          checkOut: dayFromNow(53),
+          guestCount: 2,
+        }),
+      });
+      const booking = await created.json();
+      sentEmails.length = 0;
+
+      expect((await cancel(booking.id, {})).status).toBe(200);
+
+      const mail = sentEmails.find(m => /cancelled/i.test(m.subject));
+      expect(mail!.body).toMatch(/nothing to refund/i);
+    });
   });
 
   it("sends nothing at all for a failed payment", async () => {

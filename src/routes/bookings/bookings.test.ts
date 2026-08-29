@@ -565,13 +565,15 @@ describe("bookings routes", () => {
       expect((await res.json()).status).toBe("cancelled");
     });
 
-    it.each(["confirmed", "completed", "cancelled"] as const)(
+    it.each(["completed", "cancelled"] as const)(
       "409s cancelling a booking that is already %s",
       async (status) => {
         const created = await book(guest, propertyId, dayFromNow(10), dayFromNow(15));
         const { id } = await created.json();
 
-        await db.update(bookings).set({ status }).where(eq(bookings.id, id));
+        await db.update(bookings)
+          .set({ status, cancelledAt: status === "cancelled" ? new Date() : null })
+          .where(eq(bookings.id, id));
 
         const res = await app.request(`/bookings/${id}/cancel`, {
           method: "POST",
@@ -608,6 +610,110 @@ describe("bookings routes", () => {
 
       expect(first.status).toBe(200);
       expect(second.status).toBe(409);
+    });
+  });
+
+  // A paid stay that can never be called off is not a real product: plans
+  // change on both sides, and until this existed the only way out was editing
+  // the database by hand.
+  describe("cancelling a confirmed booking", () => {
+    async function confirmed(checkIn = dayFromNow(10), checkOut = dayFromNow(15)) {
+      const created = await book(guest, propertyId, checkIn, checkOut);
+      const { id } = await created.json();
+      await db.update(bookings).set({ status: "confirmed" }).where(eq(bookings.id, id));
+      return id as string;
+    }
+
+    const cancel = (user: TestUser, id: string, body?: object) =>
+      app.request(`/bookings/${id}/cancel`, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...user.headers },
+        body: JSON.stringify(body ?? {}),
+      });
+
+    it("lets the guest cancel, recording who and when", async () => {
+      const id = await confirmed();
+
+      const res = await cancel(guest, id, { reason: "Travel plans changed" });
+      expect(res.status).toBe(200);
+
+      const [row] = await db.select().from(bookings).where(eq(bookings.id, id));
+      expect(row.status).toBe("cancelled");
+      expect(row.cancellationReason).toBe("Travel plans changed");
+      expect(row.cancelledBy).toBe(guest.id);
+      expect(row.cancelledAt).toBeInstanceOf(Date);
+    });
+
+    it("lets an admin cancel someone else's stay", async () => {
+      const id = await confirmed();
+
+      const res = await cancel(admin, id, { reason: "Burst pipe in the unit" });
+      expect(res.status).toBe(200);
+
+      const [row] = await db.select().from(bookings).where(eq(bookings.id, id));
+      expect(row.cancelledBy).toBe(admin.id);
+    });
+
+    // Taking away a stay someone paid for is the case that gets argued about
+    // later, so it does not go on the record unexplained.
+    it("422s cancelling a paid stay with no reason", async () => {
+      const id = await confirmed();
+
+      const res = await cancel(guest, id);
+      expect(res.status).toBe(422);
+      expect(JSON.stringify(await res.json())).toMatch(/reason is required/i);
+
+      const [row] = await db.select().from(bookings).where(eq(bookings.id, id));
+      expect(row.status).toBe("confirmed");
+    });
+
+    // An unpaid hold is nobody's loss.
+    it("still cancels an unpaid booking with no reason", async () => {
+      const created = await book(guest, propertyId, dayFromNow(20), dayFromNow(22));
+      const { id } = await created.json();
+
+      expect((await cancel(guest, id)).status).toBe(200);
+    });
+
+    // The nights have to go back on sale, or cancelling achieves nothing.
+    it("frees the dates for another guest", async () => {
+      const id = await confirmed(dayFromNow(40), dayFromNow(45));
+
+      const blocked = await book(guest, propertyId, dayFromNow(40), dayFromNow(45));
+      expect(blocked.status).toBe(409);
+
+      await cancel(guest, id, { reason: "Changed my mind" });
+
+      const after = await book(guest, propertyId, dayFromNow(40), dayFromNow(45));
+      expect(after.status).toBe(201);
+    });
+
+    // Cancelling a stay that has begun would free nights already slept in, and
+    // drop the booking out of the sweep that makes a finished stay reviewable.
+    it.each([
+      ["today", 0],
+      ["yesterday", -1],
+    ])("409s once the stay has begun (check-in %s)", async (_label, offset) => {
+      const created = await book(guest, propertyId, dayFromNow(60), dayFromNow(65));
+      const { id } = await created.json();
+      await db.update(bookings)
+        .set({
+          status: "confirmed",
+          checkIn: dayFromNow(offset),
+          checkOut: dayFromNow(offset + 5),
+        })
+        .where(eq(bookings.id, id));
+
+      const res = await cancel(guest, id, { reason: "Too late" });
+      expect(res.status).toBe(409);
+      expect((await res.json()).message).toMatch(/already begun/i);
+    });
+
+    it("404s a guest cancelling someone else's confirmed stay", async () => {
+      const id = await confirmed();
+      const other = await signIn(nextPhone());
+
+      expect((await cancel(other, id, { reason: "not mine" })).status).toBe(404);
     });
   });
 });

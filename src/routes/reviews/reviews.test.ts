@@ -81,7 +81,9 @@ describe("reviews", () => {
     it.each(["pending_payment", "confirmed", "cancelled"] as const)(
       "409s a booking that is %s rather than completed",
       async (status) => {
-        await db.update(bookings).set({ status }).where(eq(bookings.id, bookingId));
+        await db.update(bookings)
+          .set({ status, cancelledAt: status === "cancelled" ? new Date() : null })
+          .where(eq(bookings.id, bookingId));
         expect((await post(guest, bookingId, { rating: 5 })).status).toBe(409);
       },
     );
@@ -265,6 +267,7 @@ describe("reviews", () => {
         guestCount: 1,
         totalAmountCents: 100_000,
         status: "cancelled",
+        cancelledAt: new Date(),
       }).returning();
 
       await app.request("/admin/payments/reconcile", {
