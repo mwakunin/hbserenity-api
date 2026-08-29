@@ -719,9 +719,15 @@ Deliberately deferred — don't assume these exist:
 - **An SMS provider**, so phone OTP is dormant. The plugin, columns and
   endpoints are all present and `sendOTP` throws in production.
   Email+password is the working sign-in method meanwhile.
-- **Partial deposits.** A payment is all-or-nothing against
-  `bookings.totalAmountCents`, though 50%-now-balance-later is common
-  locally.
+- **Partial deposits — decided against, not deferred.** A payment is
+  all-or-nothing against `bookings.totalAmountCents`. 50%-now-balance-later is
+  common locally, so this will look like an omission; it isn't. Don't propose
+  it again without the owner raising it first.
+
+  It is also the most invasive change available: once a booking can be
+  part-paid, "is this booking paid?" stops being a single comparison, and
+  reconciliation, the attention list, refunds and the cancellation email each
+  need their own answer to it.
 - **A booking idempotency key**, so a double-tapped "Book now" can create two
   bookings for different dates. The same dates are already impossible — the
   overlap constraint sees to that.
