@@ -380,7 +380,15 @@ Non-default dev ports are deliberate: another project on this machine binds
   three hours of each Kenyan day — long enough for the begun-stay guard to let
   a cancellation through on the arrival date itself.
 
-  The cancellation email never claims nothing was taken while an attempt is
+  The cancellation email reads every attempt for the booking in **one**
+  statement and classifies them in memory. Asking twice — once for successful
+  attempts, once for unresolved ones — gives each query its own snapshot, and
+  settlement commits in the gap: an attempt that is `pending` for the first
+  query and `success` for the second is counted by neither, and the guest is
+  told nothing was taken. A test counts the reads, because re-splitting them
+  reintroduces exactly that.
+
+  It never claims nothing was taken while an attempt is
   still resolvable. Cancelling does not retract a prompt already on the guest's
   handset, so a charge can still land afterwards; telling them there is nothing
   to refund would stop them chasing money they are owed. It also sums **every**

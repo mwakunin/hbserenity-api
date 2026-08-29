@@ -4,10 +4,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TestUser } from "@/test/helpers";
 
 import app from "@/app";
-import db from "@/db";
+import db, { pool } from "@/db";
 import { bookings, payments } from "@/db/schema";
 import { sentEmails } from "@/lib/email";
 import { resetTokenCache } from "@/lib/mpesa";
+import { notifyBookingCancelled } from "@/lib/notifications";
 import {
   dayFromNow,
   makeProperty,
@@ -350,6 +351,69 @@ describe("payment notifications", () => {
       const mail = sentEmails.find(m => /cancelled/i.test(m.subject));
       // Both attempts: KES 27,000 each.
       expect(mail!.body).toMatch(/KES 54,000/);
+    });
+
+    // Whatever state the single attempt is in, the email has to describe it
+    // correctly — and must only claim nothing was taken when nothing can still
+    // settle.
+    it.each([
+      ["pending", /had not finished/i],
+      ["timeout", /had not finished/i],
+      ["success", /arranging your refund/i],
+      ["failed", /nothing to refund/i],
+    ] as const)("describes an attempt that is %s", async (status, expected) => {
+      const created = await app.request("/bookings", {
+        method: "POST",
+        headers: { "content-type": "application/json", ...guest.headers },
+        body: JSON.stringify({
+          propertyId,
+          checkIn: dayFromNow(70),
+          checkOut: dayFromNow(73),
+          guestCount: 2,
+        }),
+      });
+      const booking = await created.json();
+
+      await db.insert(payments).values({
+        bookingId: booking.id,
+        phoneNumber: "+254712345678",
+        amountCents: booking.totalAmountCents,
+        status,
+        checkoutRequestId: `ws_CO_state_${status}`,
+        pushDispatchedAt: new Date(),
+      });
+      sentEmails.length = 0;
+
+      expect((await cancel(booking.id, { reason: "Testing" })).status).toBe(200);
+
+      const mail = sentEmails.find(m => /cancelled/i.test(m.subject));
+      expect(mail!.body).toMatch(expected);
+    });
+
+    // The states are read in ONE statement. Split across two, settlement
+    // commits in the gap: an attempt that is pending for the first query and
+    // success for the second is counted by neither, and the guest is told
+    // nothing was taken while the charge stands against their cancelled
+    // booking. Counting the reads is what stops that being reintroduced.
+    it("reads every attempt in a single query, leaving no gap to settle in", async () => {
+      await payAndConfirm();
+
+      const spy = vi.spyOn(pool, "query");
+      try {
+        await notifyBookingCancelled(bookingId, {
+          info: () => {},
+          error: () => {},
+        });
+
+        const paymentReads = spy.mock.calls
+          .map(call => (typeof call[0] === "string" ? call[0] : (call[0] as { text?: string })?.text ?? ""))
+          .filter(text => /from "payments"/i.test(text));
+
+        expect(paymentReads).toHaveLength(1);
+      }
+      finally {
+        spy.mockRestore();
+      }
     });
 
     it("says there is nothing to refund when no payment was taken", async () => {

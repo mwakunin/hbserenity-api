@@ -1,4 +1,4 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 
 import db from "@/db";
 import { bookings, payments, properties, user } from "@/db/schema";
@@ -182,19 +182,30 @@ export async function notifyBookingCancelled(
     if (!booking || !isDeliverableEmail(booking.guestEmail))
       return;
 
-    // Every successful attempt, summed — not the first row found. A booking
-    // can hold more than one: `payments_one_pending_per_booking` constrains
-    // only pending rows, and the duplicate-charge path exists precisely
-    // because a prompt can be answered after the booking was already settled.
-    // Quoting one attempt would understate what the guest is actually owed.
-    const settled = await db.select({ amountCents: payments.amountCents })
+    // Every attempt in ONE read, then classified here.
+    //
+    // Asking twice — once for successful attempts, once for unresolved ones —
+    // gives each query its own snapshot, and settlement commits in the gap
+    // between them. An attempt that is `pending` for the first query and
+    // `success` for the second is counted by neither, and the guest is told
+    // nothing was taken while the charge sits recorded against their cancelled
+    // booking. One statement sees each attempt in exactly one state, so that
+    // answer cannot be assembled from two different moments.
+    //
+    // Every successful attempt is summed rather than the first row taken:
+    // `payments_one_pending_per_booking` constrains only pending rows, and the
+    // duplicate-charge path exists precisely because a prompt can be answered
+    // after the booking was already settled.
+    const attempts = await db.select({
+      status: payments.status,
+      amountCents: payments.amountCents,
+    })
       .from(payments)
-      .where(and(
-        eq(payments.bookingId, bookingId),
-        eq(payments.status, "success"),
-      ));
+      .where(eq(payments.bookingId, bookingId));
 
-    const paidCents = settled.reduce((total, p) => total + p.amountCents, 0);
+    const paidCents = attempts
+      .filter(a => a.status === "success")
+      .reduce((total, a) => total + a.amountCents, 0);
 
     // A prompt may still be sitting on the guest's handset. Cancelling does
     // not retract it, and a callback arriving afterwards records the charge
@@ -202,12 +213,9 @@ export async function notifyBookingCancelled(
     // paid_but_cancelled. So "nothing was taken" is a claim this cannot make
     // while an attempt is unresolved; it would tell the guest not to expect a
     // refund they are in fact owed.
-    const [inFlight] = await db.select({ id: payments.id })
-      .from(payments)
-      .where(and(
-        eq(payments.bookingId, bookingId),
-        inArray(payments.status, [...RESOLVABLE_STATUSES]),
-      ));
+    const inFlight = attempts.some(
+      a => (RESOLVABLE_STATUSES as readonly string[]).includes(a.status),
+    );
 
     await sendEmail({
       to: booking.guestEmail,
@@ -222,7 +230,7 @@ export async function notifyBookingCancelled(
         `  Reference  ${booking.reference}`,
         booking.cancellationReason ? `  Reason     ${booking.cancellationReason}` : null,
         "",
-        refundLine(paidCents, Boolean(inFlight), booking.currency),
+        refundLine(paidCents, inFlight, booking.currency),
         "",
         "Reply to this email if anything looks wrong.",
       ].filter(line => line !== null).join("\n"),
