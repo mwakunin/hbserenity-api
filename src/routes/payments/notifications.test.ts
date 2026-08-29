@@ -299,6 +299,59 @@ describe("payment notifications", () => {
       expect(mail!.body).toMatch(/KES 27,000/);
     });
 
+    // Cancelling does not retract a prompt already on the guest's handset. If
+    // the callback lands afterwards the charge is real, so promising there is
+    // nothing to refund would tell them not to chase money they are owed.
+    it("does not claim nothing was taken while a payment is still in flight", async () => {
+      mockFetch(jsonResponse(TOKEN), jsonResponse(PUSH_OK));
+      await app.request(`/bookings/${bookingId}/pay`, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...guest.headers },
+        body: JSON.stringify({ phoneNumber: "0712345678" }),
+      });
+      sentEmails.length = 0;
+
+      // Cancelled with the prompt still unanswered.
+      expect((await cancel(bookingId, {})).status).toBe(200);
+
+      const mail = sentEmails.find(m => /cancelled/i.test(m.subject));
+      expect(mail!.body).not.toMatch(/nothing to refund/i);
+      expect(mail!.body).toMatch(/had not finished/i);
+
+      // And the charge really can still arrive afterwards.
+      await app.request("/mpesa/callback", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(successCallback("ws_CO_notify_1", totalCents / 100)),
+      });
+      const [p] = await db.select().from(payments).where(eq(payments.bookingId, bookingId));
+      expect(p.status).toBe("success");
+    });
+
+    // payments_one_pending_per_booking constrains only pending rows, so a
+    // booking can hold two successful charges — that is what the duplicate
+    // charge path on the attention list is for.
+    it("totals every successful charge, not just the first", async () => {
+      await payAndConfirm();
+
+      // A second prompt answered after the booking was already settled.
+      await db.insert(payments).values({
+        bookingId,
+        phoneNumber: "+254712345678",
+        amountCents: totalCents,
+        status: "success",
+        checkoutRequestId: "ws_CO_notify_dup",
+        pushDispatchedAt: new Date(),
+      });
+      sentEmails.length = 0;
+
+      expect((await cancel(bookingId, { reason: "Double charged" })).status).toBe(200);
+
+      const mail = sentEmails.find(m => /cancelled/i.test(m.subject));
+      // Both attempts: KES 27,000 each.
+      expect(mail!.body).toMatch(/KES 54,000/);
+    });
+
     it("says there is nothing to refund when no payment was taken", async () => {
       const created = await app.request("/bookings", {
         method: "POST",

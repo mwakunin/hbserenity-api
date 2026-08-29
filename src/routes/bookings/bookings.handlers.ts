@@ -6,7 +6,7 @@ import type { AppRouteHandler } from "@/lib/types";
 
 import db from "@/db";
 import { bookings, properties, propertyBlackouts, propertyRateOverrides } from "@/db/schema";
-import { todayUtc } from "@/lib/dates";
+import { todayInBusinessZone } from "@/lib/dates";
 import { isExclusionViolation } from "@/lib/db-errors";
 import { notifyBookingCancelled } from "@/lib/notifications";
 import { calculateBookingTotal } from "@/lib/pricing";
@@ -269,7 +269,7 @@ export const cancel: AppRouteHandler<CancelRoute> = async (c) => {
   // Once the guest is due to arrive there is nothing left to cancel. Allowing
   // it would also free nights that have already been slept in, and drop the
   // booking out of the sweep that makes a finished stay reviewable.
-  if (booking.checkIn <= todayUtc()) {
+  if (booking.checkIn <= todayInBusinessZone()) {
     return c.json(
       { message: "This stay has already begun and can no longer be cancelled" },
       HttpStatusCodes.CONFLICT,

@@ -1,9 +1,10 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 
 import db from "@/db";
 import { bookings, payments, properties, user } from "@/db/schema";
 
 import { emailDeliverable, sendEmail } from "./email";
+import { RESOLVABLE_STATUSES } from "./payment-settlement";
 import { isDeliverableEmail } from "./phone";
 import { nightsBetween } from "./pricing";
 
@@ -137,6 +138,27 @@ export async function notifyBookingConfirmed(
 }
 
 /**
+ * What to tell the guest about money, without ever overstating certainty.
+ *
+ * The negative claim is the dangerous one: told "nothing to refund", a guest
+ * has no reason to chase a charge that lands afterwards. It is therefore only
+ * made when nothing can still settle.
+ */
+function refundLine(paidCents: number, inFlight: boolean, currency: string): string {
+  if (paidCents > 0) {
+    return `You paid ${formatMoney(paidCents, currency)} for this stay. `
+      + `We are arranging your refund and will confirm once it has been sent.`;
+  }
+
+  if (inFlight) {
+    return `A payment for this stay had not finished when it was cancelled. `
+      + `If it goes through, we will refund it and confirm once it has been sent.`;
+  }
+
+  return `No payment was taken, so there is nothing to refund.`;
+}
+
+/**
  * Tell the guest their stay was called off.
  *
  * Sent whichever side cancelled: the guest gets written confirmation of their
@@ -160,11 +182,31 @@ export async function notifyBookingCancelled(
     if (!booking || !isDeliverableEmail(booking.guestEmail))
       return;
 
-    const [paid] = await db.select({ amountCents: payments.amountCents })
+    // Every successful attempt, summed — not the first row found. A booking
+    // can hold more than one: `payments_one_pending_per_booking` constrains
+    // only pending rows, and the duplicate-charge path exists precisely
+    // because a prompt can be answered after the booking was already settled.
+    // Quoting one attempt would understate what the guest is actually owed.
+    const settled = await db.select({ amountCents: payments.amountCents })
       .from(payments)
       .where(and(
         eq(payments.bookingId, bookingId),
         eq(payments.status, "success"),
+      ));
+
+    const paidCents = settled.reduce((total, p) => total + p.amountCents, 0);
+
+    // A prompt may still be sitting on the guest's handset. Cancelling does
+    // not retract it, and a callback arriving afterwards records the charge
+    // against this now-cancelled booking — the case the attention list calls
+    // paid_but_cancelled. So "nothing was taken" is a claim this cannot make
+    // while an attempt is unresolved; it would tell the guest not to expect a
+    // refund they are in fact owed.
+    const [inFlight] = await db.select({ id: payments.id })
+      .from(payments)
+      .where(and(
+        eq(payments.bookingId, bookingId),
+        inArray(payments.status, [...RESOLVABLE_STATUSES]),
       ));
 
     await sendEmail({
@@ -180,10 +222,7 @@ export async function notifyBookingCancelled(
         `  Reference  ${booking.reference}`,
         booking.cancellationReason ? `  Reason     ${booking.cancellationReason}` : null,
         "",
-        paid
-          ? `You paid ${formatMoney(paid.amountCents, booking.currency)} for this stay. `
-          + `We are arranging your refund and will confirm once it has been sent.`
-          : `No payment was taken, so there is nothing to refund.`,
+        refundLine(paidCents, Boolean(inFlight), booking.currency),
         "",
         "Reply to this email if anything looks wrong.",
       ].filter(line => line !== null).join("\n"),

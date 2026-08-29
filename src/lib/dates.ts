@@ -1,3 +1,6 @@
+/** Where the properties are, and therefore what "today" means to a stay. */
+export const BUSINESS_TIME_ZONE = "Africa/Nairobi";
+
 /**
  * The calendar day, as the booking columns store it.
  *
@@ -7,12 +10,17 @@
  * way: reconciliation deciding a stay is over and a handler deciding a stay has
  * begun cannot be allowed to disagree about what day it is.
  *
- * UTC rather than Africa/Nairobi, which is where the properties are. Kenya is
- * UTC+3, so for the first three hours of a Kenyan day this still reports
- * yesterday. That is a deliberate trade: one shared definition matters more
- * than three hours of precision, and where it errs it errs in the guest's
- * favour — a stay is judged to have begun slightly later, not sooner.
+ * That day is Kenya's, not UTC's. The dates on a booking mean local calendar
+ * days — a guest arriving on the 1st means the 1st in Nairobi — and Kenya is
+ * UTC+3, so for the first three hours of each Kenyan day UTC still reports
+ * yesterday. Read in UTC, a stay beginning today looks like it begins tomorrow
+ * for those three hours, and one that ended today looks unfinished.
+ *
+ * The time zone is passed explicitly rather than read from TZ, because the
+ * container sets `TZ=UTC` on purpose: the database is UTC and the process must
+ * not drift from it. Only this calendar question is local.
  */
-export function todayUtc(): string {
-  return new Date().toISOString().slice(0, 10);
+export function todayInBusinessZone(): string {
+  // en-CA formats as YYYY-MM-DD, which is what the date columns hold.
+  return new Date().toLocaleDateString("en-CA", { timeZone: BUSINESS_TIME_ZONE });
 }

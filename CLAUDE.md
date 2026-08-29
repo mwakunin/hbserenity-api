@@ -372,9 +372,20 @@ Non-default dev ports are deliberate: another project on this machine binds
   `bookings_cancelled_at_matches_status` keeps the status and the timestamp
   from disagreeing in either direction.
 
-  "What day is it" comes from `todayUtc()` in `lib/dates.ts`, shared with
-  `completePastStays()`. Reconciliation deciding a stay is over and this
-  handler deciding a stay has begun must not disagree about the date.
+  "What day is it" comes from `todayInBusinessZone()` in `lib/dates.ts`,
+  shared with `completePastStays()`. Reconciliation deciding a stay is over and
+  this handler deciding a stay has begun must not disagree about the date. It
+  answers in **Nairobi's** calendar day, not UTC: booking dates mean local days,
+  and Kenya being UTC+3 means a UTC reading reports yesterday for the first
+  three hours of each Kenyan day — long enough for the begun-stay guard to let
+  a cancellation through on the arrival date itself.
+
+  The cancellation email never claims nothing was taken while an attempt is
+  still resolvable. Cancelling does not retract a prompt already on the guest's
+  handset, so a charge can still land afterwards; telling them there is nothing
+  to refund would stop them chasing money they are owed. It also sums **every**
+  successful attempt — `payments_one_pending_per_booking` constrains only
+  pending rows, so the duplicate-charge path can leave two.
 
 - **Booking price snapshot**: `bookings.totalAmountCents` is fixed at
   creation time and must never be recalculated from the property's current

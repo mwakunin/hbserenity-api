@@ -3,7 +3,7 @@ import { and, eq, inArray, isNotNull, isNull, lt, lte, sql } from "drizzle-orm";
 import db from "@/db";
 import { bookings, payments } from "@/db/schema";
 
-import { todayUtc } from "./dates";
+import { todayInBusinessZone } from "./dates";
 import { RESOLVABLE_STATUSES, settleAttemptFromProvider } from "./payment-settlement";
 import { fullyRefunded } from "./refunds";
 
@@ -177,7 +177,7 @@ export async function paymentsNeedingAttention(): Promise<AttentionItem[]> {
  * check-out day is already bookable by the next guest.
  */
 export async function completePastStays(): Promise<number> {
-  const today = todayUtc();
+  const today = todayInBusinessZone();
 
   const completed = await db.update(bookings)
     .set({ status: "completed" })
