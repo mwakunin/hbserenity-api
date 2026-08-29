@@ -13,7 +13,7 @@ importers:
         version: 1.18.1(hono@4.9.6)
       '@hono/zod-openapi':
         specifier: ^1.0.2
-        version: 1.0.2(hono@4.9.6)(zod@4.0.14)
+        version: 1.0.2(hono@4.9.6)(zod@4.4.3)
       '@scalar/hono-api-reference':
         specifier: ^0.9.13
         version: 0.9.13(hono@4.9.6)
@@ -34,7 +34,7 @@ importers:
         version: 0.44.4(@libsql/client@0.15.10)(@types/pg@8.23.1)(kysely@0.29.5)(pg@8.23.0)
       drizzle-zod:
         specifier: ^0.8.2
-        version: 0.8.2(drizzle-orm@0.44.4(@libsql/client@0.15.10)(@types/pg@8.23.1)(kysely@0.29.5)(pg@8.23.0))(zod@4.0.14)
+        version: 0.8.2(drizzle-orm@0.44.4(@libsql/client@0.15.10)(@types/pg@8.23.1)(kysely@0.29.5)(pg@8.23.0))(zod@4.4.3)
       hono:
         specifier: ^4.9.6
         version: 4.9.6
@@ -61,10 +61,10 @@ importers:
         version: 6.24.0
       stoker:
         specifier: 2.0.1
-        version: 2.0.1(@asteasolutions/zod-to-openapi@8.1.0(zod@4.0.14))(@hono/zod-openapi@1.0.2(hono@4.9.6)(zod@4.0.14))(hono@4.9.6)(openapi3-ts@4.5.0)
+        version: 2.0.1(@asteasolutions/zod-to-openapi@8.1.0(zod@4.4.3))(@hono/zod-openapi@1.0.2(hono@4.9.6)(zod@4.4.3))(hono@4.9.6)(openapi3-ts@4.5.0)
       zod:
-        specifier: ^4.0.14
-        version: 4.0.14
+        specifier: ^4.4.3
+        version: 4.4.3
     devDependencies:
       '@antfu/eslint-config':
         specifier: ^5.1.0
@@ -3161,9 +3161,6 @@ packages:
   zod@3.24.1:
     resolution: {integrity: sha512-muH7gBL9sI1nciMZV67X5fTKKBLtwpZ5VBp1vsOQzj1MhrBZ4wlVCm3gedKZWLp0Oyel8sIGfeiz54Su+OVT+A==}
 
-  zod@4.0.14:
-    resolution: {integrity: sha512-nGFJTnJN6cM2v9kXL+SOBq3AtjQby3Mv5ySGFof5UGRHrRioSJ5iG680cYNjE/yWk671nROcpPj4hAS8nyLhSw==}
-
   zod@4.4.3:
     resolution: {integrity: sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ==}
 
@@ -3225,10 +3222,10 @@ snapshots:
       package-manager-detector: 1.3.0
       tinyexec: 1.0.1
 
-  '@asteasolutions/zod-to-openapi@8.1.0(zod@4.0.14)':
+  '@asteasolutions/zod-to-openapi@8.1.0(zod@4.4.3)':
     dependencies:
       openapi3-ts: 4.5.0
-      zod: 4.0.14
+      zod: 4.4.3
 
   '@babel/helper-string-parser@7.27.1': {}
 
@@ -3715,18 +3712,18 @@ snapshots:
     dependencies:
       hono: 4.9.6
 
-  '@hono/zod-openapi@1.0.2(hono@4.9.6)(zod@4.0.14)':
+  '@hono/zod-openapi@1.0.2(hono@4.9.6)(zod@4.4.3)':
     dependencies:
-      '@asteasolutions/zod-to-openapi': 8.1.0(zod@4.0.14)
-      '@hono/zod-validator': 0.7.2(hono@4.9.6)(zod@4.0.14)
+      '@asteasolutions/zod-to-openapi': 8.1.0(zod@4.4.3)
+      '@hono/zod-validator': 0.7.2(hono@4.9.6)(zod@4.4.3)
       hono: 4.9.6
       openapi3-ts: 4.5.0
-      zod: 4.0.14
+      zod: 4.4.3
 
-  '@hono/zod-validator@0.7.2(hono@4.9.6)(zod@4.0.14)':
+  '@hono/zod-validator@0.7.2(hono@4.9.6)(zod@4.4.3)':
     dependencies:
       hono: 4.9.6
-      zod: 4.0.14
+      zod: 4.4.3
 
   '@humanfs/core@0.19.1': {}
 
@@ -4393,10 +4390,10 @@ snapshots:
       kysely: 0.29.5
       pg: 8.23.0
 
-  drizzle-zod@0.8.2(drizzle-orm@0.44.4(@libsql/client@0.15.10)(@types/pg@8.23.1)(kysely@0.29.5)(pg@8.23.0))(zod@4.0.14):
+  drizzle-zod@0.8.2(drizzle-orm@0.44.4(@libsql/client@0.15.10)(@types/pg@8.23.1)(kysely@0.29.5)(pg@8.23.0))(zod@4.4.3):
     dependencies:
       drizzle-orm: 0.44.4(@libsql/client@0.15.10)(@types/pg@8.23.1)(kysely@0.29.5)(pg@8.23.0)
-      zod: 4.0.14
+      zod: 4.4.3
 
   electron-to-chromium@1.5.194: {}
 
@@ -5782,12 +5779,12 @@ snapshots:
 
   std-env@3.9.0: {}
 
-  stoker@2.0.1(@asteasolutions/zod-to-openapi@8.1.0(zod@4.0.14))(@hono/zod-openapi@1.0.2(hono@4.9.6)(zod@4.0.14))(hono@4.9.6)(openapi3-ts@4.5.0):
+  stoker@2.0.1(@asteasolutions/zod-to-openapi@8.1.0(zod@4.4.3))(@hono/zod-openapi@1.0.2(hono@4.9.6)(zod@4.4.3))(hono@4.9.6)(openapi3-ts@4.5.0):
     dependencies:
       hono: 4.9.6
     optionalDependencies:
-      '@asteasolutions/zod-to-openapi': 8.1.0(zod@4.0.14)
-      '@hono/zod-openapi': 1.0.2(hono@4.9.6)(zod@4.0.14)
+      '@asteasolutions/zod-to-openapi': 8.1.0(zod@4.4.3)
+      '@hono/zod-openapi': 1.0.2(hono@4.9.6)(zod@4.4.3)
       openapi3-ts: 4.5.0
 
   strip-indent@4.0.0:
@@ -6043,8 +6040,6 @@ snapshots:
   yocto-queue@0.1.0: {}
 
   zod@3.24.1: {}
-
-  zod@4.0.14: {}
 
   zod@4.4.3: {}
 
