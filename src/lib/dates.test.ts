@@ -31,6 +31,45 @@ describe("todayInBusinessZone", () => {
     }
   });
 
+  // The shape is what makes the value comparable to a `date` column at all.
+  // A locale fallback that printed 9/1/2026 would not throw — it would just
+  // compare wrongly, and "2026-09-01" <= "9/1/2026" is true, so every stay
+  // would look already begun.
+  it("always produces a zero-padded YYYY-MM-DD", () => {
+    vi.useFakeTimers();
+
+    try {
+      for (const instant of [
+        "2026-01-05T09:00:00Z",
+        "2026-09-01T09:00:00Z",
+        "2026-12-31T21:30:00Z",
+      ]) {
+        vi.setSystemTime(new Date(instant));
+        expect(todayInBusinessZone()).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      }
+    }
+    finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("orders correctly as a string, which is how it is compared", () => {
+    vi.useFakeTimers();
+
+    try {
+      vi.setSystemTime(new Date("2026-01-05T09:00:00Z"));
+      const january = todayInBusinessZone();
+      vi.setSystemTime(new Date("2026-09-01T09:00:00Z"));
+      const september = todayInBusinessZone();
+
+      expect(january).toBe("2026-01-05");
+      expect(january < september).toBe(true);
+    }
+    finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("disagrees with UTC exactly when Kenya has already turned over", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-31T22:00:00Z"));

@@ -20,7 +20,28 @@ export const BUSINESS_TIME_ZONE = "Africa/Nairobi";
  * container sets `TZ=UTC` on purpose: the database is UTC and the process must
  * not drift from it. Only this calendar question is local.
  */
+const dayParts = new Intl.DateTimeFormat("en-US", {
+  timeZone: BUSINESS_TIME_ZONE,
+  // Pinned so the parts are Gregorian and written in Latin digits whatever the
+  // host's defaults are.
+  calendar: "gregory",
+  numberingSystem: "latn",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+
 export function todayInBusinessZone(): string {
-  // en-CA formats as YYYY-MM-DD, which is what the date columns hold.
-  return new Date().toLocaleDateString("en-CA", { timeZone: BUSINESS_TIME_ZONE });
+  // Assembled from typed parts rather than read off a formatted string.
+  // `toLocaleDateString("en-CA")` happens to print YYYY-MM-DD, but only while
+  // en-CA actually resolves; on a build whose ICU data lacks it the call
+  // silently falls back and returns something like 9/1/2026. Nothing throws —
+  // the string simply stops being comparable to a date column, and
+  // `"2026-09-01" <= "9/1/2026"` is true, so every stay would look already
+  // begun and every confirmed booking already finished. Taking the parts by
+  // name cannot go wrong that way.
+  const parts = dayParts.formatToParts(new Date());
+  const value = (type: string) => parts.find(p => p.type === type)?.value ?? "";
+
+  return `${value("year")}-${value("month")}-${value("day")}`;
 }
