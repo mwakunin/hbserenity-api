@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { sql } from "drizzle-orm";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { TestUser } from "@/test/helpers";
 
@@ -212,6 +213,59 @@ describe("admin payments list", () => {
       expect(body).not.toContain(row.checkoutRequestId!);
       expect(body).not.toContain(row.merchantRequestId!);
       expect(body).not.toMatch(/checkoutRequestId|merchantRequestId/i);
+    });
+  });
+
+  describe("consistency", () => {
+    /*
+     * The page, the count-and-received total, and the refunds against that
+     * same set are three separate reads. Under READ COMMITTED each takes its
+     * own snapshot: a refund committing between the first and the third makes
+     * a row report itself unrefunded while `totals` counts that refund, and
+     * an attempt settling between the first and the second changes
+     * `receivedCents` without changing the page it summarises.
+     *
+     * Neither test below can observe the gap itself — that needs a commit
+     * landing between two statements inside the handler, which nothing
+     * in-process can schedule. Together they pin the two halves that can be
+     * checked: that the handler asks for one snapshot, and that asking for it
+     * is a request Postgres honours.
+     */
+    it("reads all three queries inside one repeatable-read snapshot", async () => {
+      await attempt(1_000_000, "success");
+
+      const spy = vi.spyOn(db, "transaction");
+      try {
+        expect((await list()).status).toBe(200);
+
+        expect(spy).toHaveBeenCalledTimes(1);
+        expect(spy.mock.calls[0][1]).toEqual({
+          isolationLevel: "repeatable read",
+          accessMode: "read only",
+        });
+      }
+      finally {
+        spy.mockRestore();
+      }
+    });
+
+    // The option above is only worth asserting if it reaches the database.
+    // A drizzle upgrade that quietly stopped applying it would leave the
+    // handler reading three snapshots again while still looking correct.
+    it("actually opens the transaction Postgres was asked for", async () => {
+      const seen = await db.transaction(
+        async (tx) => {
+          const result = await tx.execute(sql`
+            select current_setting('transaction_isolation') as iso,
+                   current_setting('transaction_read_only') as read_only
+          `);
+          return result.rows[0] as { iso: string; read_only: string };
+        },
+        { isolationLevel: "repeatable read", accessMode: "read only" },
+      );
+
+      expect(seen.iso).toBe("repeatable read");
+      expect(seen.read_only).toBe("on");
     });
   });
 

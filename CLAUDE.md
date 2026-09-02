@@ -622,6 +622,15 @@ Non-default dev ports are deliberate: another project on this machine binds
   whole response body rather than on named fields, so a correlation id added
   to the table later cannot slip in unnoticed.
 
+  All three reads run in **one REPEATABLE READ, read-only transaction**. They
+  are three questions about the same set — the page, the count and what was
+  received, and the refunds against it — and under READ COMMITTED each takes
+  its own snapshot: a refund committing between the first and the third makes
+  a row report itself unrefunded while `totals` counts it. Figures meant to be
+  reconciled against each other have to come from one moment. Sequential
+  rather than concurrent reads is not the price of the snapshot: a transaction
+  is one connection, so `Promise.all` never ran them in parallel either.
+
   `refundedCents` per row comes from a correlated subquery built with the
   **query builder**, not written into a `sql` template. Drizzle only qualifies
   column names it can see are ambiguous, and an outer table referenced from a

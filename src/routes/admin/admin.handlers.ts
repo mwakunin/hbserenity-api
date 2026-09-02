@@ -163,11 +163,32 @@ export const listPayments: AppRouteHandler<ListPaymentsRoute> = async (c) => {
 
   const where = filters.length > 0 ? and(...filters) : undefined;
 
-  const [rows, [summary], [{ refunded }]] = await Promise.all([
+  /*
+   * All three reads share one snapshot.
+   *
+   * Under READ COMMITTED each statement takes its own, and these are three
+   * separate questions about the same set: the page, the count and what was
+   * received, and the refunds against it. A refund committing between the
+   * first and the third makes a row report itself unrefunded while `totals`
+   * counts that refund; an attempt settling between the first and the second
+   * changes `receivedCents` without changing the page it is supposed to
+   * summarise. These figures exist to be reconciled against each other, so
+   * they have to come from one moment. Same reasoning as the cancellation
+   * email reading every attempt in one statement.
+   *
+   * REPEATABLE READ takes the snapshot once, at the first query. Read-only
+   * because nothing here writes, and it tells Postgres so.
+   *
+   * The reads run in sequence rather than concurrently, which is not a cost
+   * being paid for the snapshot: a transaction is a single connection, so
+   * `Promise.all` would have interleaved them on one wire rather than running
+   * them in parallel.
+   */
+  const { rows, summary, refunded } = await db.transaction(async (tx) => {
     // Columns are named, never selected wholesale: `checkoutRequestId` and
     // `merchantRequestId` are what an unauthenticated callback uses to
     // identify an attempt, so they must not leave the server.
-    db.select({
+    const attempts = await tx.select({
       id: payments.id,
       bookingId: payments.bookingId,
       provider: payments.provider,
@@ -186,29 +207,31 @@ export const listPayments: AppRouteHandler<ListPaymentsRoute> = async (c) => {
       .offset((page - 1) * limit)
       // `createdAt` is not unique, so offset pagination needs `id` to make the
       // order total.
-      .orderBy(desc(payments.createdAt), asc(payments.id)),
+      .orderBy(desc(payments.createdAt), asc(payments.id));
 
     // Over every match, not the page. `filter (where status = 'success')`
     // because a pending or failed attempt is not money — counting one would
     // report takings for a prompt nobody answered.
-    db.select({
+    const [totals] = await tx.select({
       total: count(),
       receivedCents: sql<number>`coalesce(sum(${payments.amountCents})
         filter (where ${payments.status} = 'success'), 0)`.mapWith(Number),
     })
       .from(payments)
-      .where(where),
+      .where(where);
 
     // Refunds against the same set. Separate from the query above because
     // joining refunds to payments there would repeat a payment that has two
     // of them and double-count its amount in `receivedCents`.
-    db.select({
+    const [{ refunded: refundedTotal }] = await tx.select({
       refunded: sql<number>`coalesce(sum(${refunds.amountCents}), 0)`.mapWith(Number),
     })
       .from(refunds)
       .innerJoin(payments, eq(payments.id, refunds.paymentId))
-      .where(where),
-  ]);
+      .where(where);
+
+    return { rows: attempts, summary: totals, refunded: refundedTotal };
+  }, { isolationLevel: "repeatable read", accessMode: "read only" });
 
   return c.json({
     data: rows,
