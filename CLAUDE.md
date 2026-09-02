@@ -328,6 +328,27 @@ Non-default dev ports are deliberate: another project on this machine binds
   A lateral subquery is not a join in the fan-out sense — a listing is still
   one row in the page. A real join would repeat the listing per photo.
 
+- **`checkIn`/`checkOut` on the browse list filter by availability, and both
+  are required together.** A search bar carrying dates could not filter on
+  them, and the alternative was an availability request per listing on the
+  page. One date without the other is a **422**, not a silently ignored
+  filter: ignoring it would show a guest listings that are taken on exactly
+  the dates they asked for.
+
+  Two correlated `NOT EXISTS` subqueries, not a join — a listing with three
+  overlapping bookings must be excluded once rather than repeated three times
+  and deduplicated, and the subquery stops at the first row it finds. Blackouts
+  count alongside bookings, since dates the host took off the market are not
+  for sale either.
+
+  The predicate comes from `overlapsWindow()` in `lib/availability.ts`, which
+  is the same helper `GET /properties/{id}/availability` and booking creation
+  use, along with `HOLDING_STATUSES`. Both were previously written out at each
+  of six call sites, which is how "free" comes to mean two different things
+  depending on which endpoint a guest asked. Half-open on both sides: a
+  listing whose stay ends on the requested check-in is free, and back-to-back
+  stays stay findable.
+
 - **`status` on the browse list is admin-only, and "active" is an
   unconditional floor.** The branch that widens the filter is the exception, so
   a mistake there leaves the endpoint too strict rather than leaking a draft.

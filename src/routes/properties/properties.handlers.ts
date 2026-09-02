@@ -1,11 +1,12 @@
-import { and, count, eq, gte, lte } from "drizzle-orm";
+import { and, count, eq, gte, inArray, lte, notExists, sql } from "drizzle-orm";
 import * as HttpStatusCodes from "stoker/http-status-codes";
 import * as HttpStatusPhrases from "stoker/http-status-phrases";
 
 import type { AppRouteHandler } from "@/lib/types";
 
 import db from "@/db";
-import { bookings, properties } from "@/db/schema";
+import { bookings, properties, propertyBlackouts } from "@/db/schema";
+import { HOLDING_STATUSES, overlapsWindow } from "@/lib/availability";
 import { ZOD_ERROR_CODES, ZOD_ERROR_MESSAGES } from "@/lib/constants";
 import { isCheckViolation, isForeignKeyViolation, pgConstraintName } from "@/lib/db-errors";
 
@@ -62,8 +63,18 @@ function checkViolationBody(err: unknown) {
 }
 
 export const list: AppRouteHandler<ListRoute> = async (c) => {
-  const { county, town, propertyType, minGuests, maxPriceCents, status, page, limit }
-    = c.req.valid("query");
+  const {
+    county,
+    town,
+    propertyType,
+    minGuests,
+    maxPriceCents,
+    status,
+    checkIn,
+    checkOut,
+    page,
+    limit,
+  } = c.req.valid("query");
 
   const isAdmin = c.var.user?.role === "admin";
 
@@ -102,6 +113,46 @@ export const list: AppRouteHandler<ListRoute> = async (c) => {
     filters.push(gte(properties.maxGuests, minGuests));
   if (maxPriceCents !== undefined)
     filters.push(lte(properties.pricePerNightCents, maxPriceCents));
+
+  /*
+   * Free for the whole stay, decided in the database.
+   *
+   * The schema guarantees these arrive together. Two NOT EXISTS rather than a
+   * join: a listing with three overlapping bookings must be excluded once,
+   * not repeated three times and then deduplicated, and the subquery can stop
+   * at the first row it finds.
+   *
+   * The same predicate the availability endpoint uses, from the same helper,
+   * so "free" cannot come to mean two different things depending on which
+   * endpoint a guest asked. Blackouts count as well as bookings — dates the
+   * host took off the market are not for sale either.
+   */
+  if (checkIn && checkOut) {
+    filters.push(
+      notExists(
+        db.select({ held: sql`1` })
+          .from(bookings)
+          .where(and(
+            eq(bookings.propertyId, properties.id),
+            inArray(bookings.status, [...HOLDING_STATUSES]),
+            overlapsWindow(bookings.checkIn, bookings.checkOut, checkIn, checkOut),
+          )),
+      ),
+      notExists(
+        db.select({ held: sql`1` })
+          .from(propertyBlackouts)
+          .where(and(
+            eq(propertyBlackouts.propertyId, properties.id),
+            overlapsWindow(
+              propertyBlackouts.startDate,
+              propertyBlackouts.endDate,
+              checkIn,
+              checkOut,
+            ),
+          )),
+      ),
+    );
+  }
 
   const where = filters.length > 0 ? and(...filters) : undefined;
 

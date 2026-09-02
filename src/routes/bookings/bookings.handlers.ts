@@ -6,6 +6,7 @@ import type { AppRouteHandler } from "@/lib/types";
 
 import db from "@/db";
 import { bookings, properties, propertyBlackouts, propertyRateOverrides, user } from "@/db/schema";
+import { HOLDING_STATUSES, overlapsWindow } from "@/lib/availability";
 import { todayInBusinessZone } from "@/lib/dates";
 import { isExclusionViolation } from "@/lib/db-errors";
 import { notifyBookingCancelled } from "@/lib/notifications";
@@ -21,13 +22,6 @@ import type {
   ListRoute,
   RemoveBlackoutRoute,
 } from "./bookings.routes";
-
-/**
- * Booking statuses that actually hold dates against other guests — and so
- * exactly the ones that can still be called off. A booking that holds nothing
- * has either already happened or was cancelled once already.
- */
-const HOLDING_STATUSES = ["pending_payment", "confirmed"] as const;
 
 // Postgres raises 23P01 when an EXCLUDE constraint is violated — that's the
 // bookings_no_overlap guard firing. It is the real concurrency defence: two
@@ -57,15 +51,13 @@ export const availability: AppRouteHandler<AvailabilityRoute> = async (c) => {
       .where(and(
         eq(bookings.propertyId, id),
         inArray(bookings.status, [...HOLDING_STATUSES]),
-        lt(bookings.checkIn, to),
-        gt(bookings.checkOut, from),
+        overlapsWindow(bookings.checkIn, bookings.checkOut, from, to),
       )),
     db.select({ start: propertyBlackouts.startDate, end: propertyBlackouts.endDate })
       .from(propertyBlackouts)
       .where(and(
         eq(propertyBlackouts.propertyId, id),
-        lt(propertyBlackouts.startDate, to),
-        gt(propertyBlackouts.endDate, from),
+        overlapsWindow(propertyBlackouts.startDate, propertyBlackouts.endDate, from, to),
       )),
   ]);
 
@@ -116,8 +108,12 @@ export const create: AppRouteHandler<CreateRoute> = async (c) => {
         .from(propertyBlackouts)
         .where(and(
           eq(propertyBlackouts.propertyId, propertyId),
-          lt(propertyBlackouts.startDate, checkOut),
-          gt(propertyBlackouts.endDate, checkIn),
+          overlapsWindow(
+            propertyBlackouts.startDate,
+            propertyBlackouts.endDate,
+            checkIn,
+            checkOut,
+          ),
         ));
 
       if (blackoutHits > 0)
@@ -134,8 +130,12 @@ export const create: AppRouteHandler<CreateRoute> = async (c) => {
         .from(propertyRateOverrides)
         .where(and(
           eq(propertyRateOverrides.propertyId, propertyId),
-          lt(propertyRateOverrides.startDate, checkOut),
-          gt(propertyRateOverrides.endDate, checkIn),
+          overlapsWindow(
+            propertyRateOverrides.startDate,
+            propertyRateOverrides.endDate,
+            checkIn,
+            checkOut,
+          ),
         ));
 
       // Server-side price, snapshotted onto the row. Never from the client.
@@ -387,8 +387,7 @@ export const createBlackout: AppRouteHandler<CreateBlackoutRoute> = async (c) =>
         .where(and(
           eq(bookings.propertyId, propertyId),
           inArray(bookings.status, [...HOLDING_STATUSES]),
-          lt(bookings.checkIn, endDate),
-          gt(bookings.checkOut, startDate),
+          overlapsWindow(bookings.checkIn, bookings.checkOut, startDate, endDate),
         ));
 
       if (bookedHits > 0)

@@ -38,7 +38,12 @@ export const list = createRoute({
     + "the default is still 'active', so browsing as an admin shows what a "
     + "guest sees.\n\n"
     + "Each listing carries its `coverImage` so a grid can show photos without "
-    + "a request per card. The full gallery stays on `GET /properties/{id}`.",
+    + "a request per card. The full gallery stays on `GET /properties/{id}`.\n\n"
+    + "Pass `checkIn` and `checkOut` together to return only listings free for "
+    + "the whole stay — bookings that hold dates and host blackouts both count "
+    + "as taken. Ranges are half-open, so a listing is free on the day a "
+    + "previous stay checks out. One date without the other is a 422 rather "
+    + "than a silently ignored filter.",
   middleware: [rateLimits.read()],
   request: {
     query: listPropertiesQuerySchema,
