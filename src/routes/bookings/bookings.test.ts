@@ -5,8 +5,8 @@ import type { TestUser } from "@/test/helpers";
 
 import app from "@/app";
 import db from "@/db";
-import { bookings, properties } from "@/db/schema";
-import { dayFromNow, makeProperty, nextPhone, resetDb, signIn } from "@/test/helpers";
+import { bookings, properties, propertyBlackouts } from "@/db/schema";
+import { dayFromNow, makeProperty, nextEmail, nextPhone, resetDb, signIn, signUpWithEmail } from "@/test/helpers";
 
 async function book(
   user: TestUser,
@@ -385,6 +385,175 @@ describe("bookings routes", () => {
       const res = await blackout(admin, dayFromNow(15), dayFromNow(10));
       expect(res.status).toBe(422);
     });
+
+    describe("listing and removing", () => {
+      async function listBlackouts(user: TestUser, query = "") {
+        return app.request(`/blackouts${query}`, { headers: user.headers });
+      }
+
+      async function removeBlackout(user: TestUser, id: string) {
+        return app.request(`/blackouts/${id}`, {
+          method: "DELETE",
+          headers: user.headers,
+        });
+      }
+
+      it("lists them for an admin, earliest first", async () => {
+        await blackout(admin, dayFromNow(20), dayFromNow(25));
+        await blackout(admin, dayFromNow(10), dayFromNow(15));
+
+        const res = await listBlackouts(admin);
+        const { data, meta } = await res.json();
+
+        expect(res.status).toBe(200);
+        expect(meta.total).toBe(2);
+        expect(data.map((b: { startDate: string }) => b.startDate))
+          .toEqual([dayFromNow(10), dayFromNow(20)]);
+      });
+
+      // The reason is host-internal — why the owner took dates off the market
+      // is nobody else's business, which is why availability does not carry it.
+      it.each([
+        ["a guest", 403],
+        ["nobody", 401],
+      ])("refuses to list them for %s", async (who, expected) => {
+        const res = who === "a guest"
+          ? await listBlackouts(guest)
+          : await app.request("/blackouts");
+
+        expect(res.status).toBe(expected);
+      });
+
+      it("filters by property", async () => {
+        const other = await makeProperty(admin.id);
+        await blackout(admin, dayFromNow(10), dayFromNow(15));
+        await app.request("/blackouts", {
+          method: "POST",
+          headers: { "content-type": "application/json", ...admin.headers },
+          body: JSON.stringify({
+            propertyId: other.id,
+            startDate: dayFromNow(10),
+            endDate: dayFromNow(15),
+          }),
+        });
+
+        const { data } = await (await listBlackouts(admin, `?propertyId=${other.id}`)).json();
+
+        expect(data).toHaveLength(1);
+        expect(data[0].propertyId).toBe(other.id);
+      });
+
+      // Overlap, not containment: the blackout a calendar most needs to show
+      // is the one already running when the window opens.
+      it("includes a blackout that spans the whole window", async () => {
+        await blackout(admin, dayFromNow(10), dayFromNow(40));
+
+        const { data } = await (await listBlackouts(
+          admin,
+          `?from=${dayFromNow(20)}&to=${dayFromNow(25)}`,
+        )).json();
+
+        expect(data).toHaveLength(1);
+      });
+
+      // Half-open at both ends, like every other range here.
+      it("excludes one that ends on `from` or starts on `to`", async () => {
+        await blackout(admin, dayFromNow(5), dayFromNow(20));
+        await blackout(admin, dayFromNow(30), dayFromNow(35));
+
+        const { data } = await (await listBlackouts(
+          admin,
+          `?from=${dayFromNow(20)}&to=${dayFromNow(30)}`,
+        )).json();
+
+        expect(data).toEqual([]);
+      });
+
+      // The whole point of the endpoint: blocking dates stops being a
+      // one-way door.
+      it("puts the dates back on sale when removed", async () => {
+        const created = await blackout(admin, dayFromNow(10), dayFromNow(15));
+        const { id } = await created.json();
+
+        expect((await book(guest, propertyId, dayFromNow(11), dayFromNow(14))).status)
+          .toBe(409);
+
+        const removed = await removeBlackout(admin, id);
+        expect(removed.status).toBe(204);
+
+        expect((await book(guest, propertyId, dayFromNow(11), dayFromNow(14))).status)
+          .toBe(201);
+      });
+
+      it("404s an unknown id", async () => {
+        const res = await removeBlackout(admin, "4651e634-a530-4484-9b09-9616a28f35e3");
+        expect(res.status).toBe(404);
+      });
+
+      it("forbids a guest from removing one", async () => {
+        const created = await blackout(admin, dayFromNow(10), dayFromNow(15));
+        const { id } = await created.json();
+
+        const res = await removeBlackout(guest, id);
+        expect(res.status).toBe(403);
+      });
+
+      /*
+       * Offset pagination needs a total order. `startDate` is not unique, so
+       * with it alone the database is free to return the tied rows in any
+       * order per page — the same row can land on two pages while another
+       * lands on none.
+       *
+       * The ids are fixed so the lowest is inserted LAST: without the
+       * tiebreaker the pages come back in insertion order, which is the
+       * reverse of what the tiebreaker gives.
+       */
+      it("pages tied start dates in a stable order", async () => {
+        const ids = [
+          "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+          "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+          "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        ];
+
+        // One property each: the EXCLUDE constraint forbids two blackouts
+        // over the same dates on one property.
+        for (const id of ids) {
+          const property = await makeProperty(admin.id);
+          await db.insert(propertyBlackouts).values({
+            id,
+            propertyId: property.id,
+            startDate: dayFromNow(10),
+            endDate: dayFromNow(15),
+          });
+        }
+
+        const paged: string[] = [];
+        for (let page = 1; page <= 3; page++) {
+          const { data } = await (await listBlackouts(admin, `?page=${page}&limit=1`)).json();
+          paged.push(...data.map((b: { id: string }) => b.id));
+        }
+
+        expect(paged).toEqual([...ids].sort());
+        expect(new Set(paged).size).toBe(3);
+      });
+
+      // Pins the contract, not the race: two removals of one blackout must
+      // report one success and one 404, never two successes. Firing them
+      // together does not guarantee they overlap in the database — the
+      // handler deletes and checks in a single statement so that the answer
+      // holds when they do, which this cannot observe from in-process.
+      it("reports one 204 and one 404 when the same blackout is removed twice", async () => {
+        const created = await blackout(admin, dayFromNow(10), dayFromNow(15));
+        const { id } = await created.json();
+
+        const results = await Promise.all([
+          removeBlackout(admin, id),
+          removeBlackout(admin, id),
+        ]);
+
+        expect(results.map(r => r.status).sort()).toEqual([204, 404]);
+      });
+    });
   });
 
   describe("availability", () => {
@@ -515,6 +684,53 @@ describe("bookings routes", () => {
 
       const res = await app.request("/bookings", { headers: admin.headers });
       expect((await res.json()).data).toHaveLength(2);
+    });
+
+    // Without this a dashboard can only print a uuid, or fetch a user per
+    // row to turn it into a name. `GET /properties/{id}/reviews` already
+    // joins for exactly this reason.
+    it("carries the guest's name", async () => {
+      const named = await signUpWithEmail(
+        nextEmail(),
+        "correct-horse-battery",
+        "Amina Wanjiru",
+      );
+      await book(named, propertyId, dayFromNow(10), dayFromNow(15));
+
+      const res = await app.request("/bookings", { headers: admin.headers });
+      const { data } = await res.json();
+
+      expect(data[0].guestName).toBe("Amina Wanjiru");
+    });
+
+    it("carries it on a guest's own list too", async () => {
+      const named = await signUpWithEmail(
+        nextEmail(),
+        "correct-horse-battery",
+        "Otieno Odhiambo",
+      );
+      await book(named, propertyId, dayFromNow(10), dayFromNow(15));
+
+      const res = await app.request("/bookings", { headers: named.headers });
+      const { data } = await res.json();
+
+      expect(data[0].guestName).toBe("Otieno Odhiambo");
+    });
+
+    // The display name is all this endpoint needs. An email and a phone
+    // number sit on the same row and must not ride along with it.
+    it("carries the name only, not the guest's contact details", async () => {
+      const email = nextEmail();
+      const named = await signUpWithEmail(email, "correct-horse-battery", "Amina Wanjiru");
+      await book(named, propertyId, dayFromNow(10), dayFromNow(15));
+
+      const res = await app.request("/bookings", { headers: admin.headers });
+      const body = await res.text();
+
+      expect(body).toContain("Amina Wanjiru");
+      expect(body).not.toContain(email);
+      expect(JSON.parse(body).data[0]).not.toHaveProperty("email");
+      expect(JSON.parse(body).data[0]).not.toHaveProperty("phoneNumber");
     });
 
     it("filters by status", async () => {

@@ -328,6 +328,27 @@ Non-default dev ports are deliberate: another project on this machine binds
   A lateral subquery is not a join in the fan-out sense — a listing is still
   one row in the page. A real join would repeat the listing per photo.
 
+- **`checkIn`/`checkOut` on the browse list filter by availability, and both
+  are required together.** A search bar carrying dates could not filter on
+  them, and the alternative was an availability request per listing on the
+  page. One date without the other is a **422**, not a silently ignored
+  filter: ignoring it would show a guest listings that are taken on exactly
+  the dates they asked for.
+
+  Two correlated `NOT EXISTS` subqueries, not a join — a listing with three
+  overlapping bookings must be excluded once rather than repeated three times
+  and deduplicated, and the subquery stops at the first row it finds. Blackouts
+  count alongside bookings, since dates the host took off the market are not
+  for sale either.
+
+  The predicate comes from `overlapsWindow()` in `lib/availability.ts`, which
+  is the same helper `GET /properties/{id}/availability` and booking creation
+  use, along with `HOLDING_STATUSES`. Both were previously written out at each
+  of six call sites, which is how "free" comes to mean two different things
+  depending on which endpoint a guest asked. Half-open on both sides: a
+  listing whose stay ends on the requested check-in is free, and back-to-back
+  stays stay findable.
+
 - **`status` on the browse list is admin-only, and "active" is an
   unconditional floor.** The branch that widens the filter is the exception, so
   a mistake there leaves the endpoint too strict rather than leaking a draft.
@@ -384,6 +405,86 @@ Non-default dev ports are deliberate: another project on this machine binds
   `property_images_one_cover_idx`. Two covers has no defined answer, and a
   check-then-update cannot prevent it — both requests read "no other cover".
   The handlers clear then set for the ordinary case and map `23505` to 409.
+
+- **`GET /bookings` carries `guestName`, and nothing else about the guest.**
+  A `guestId` on its own cannot be rendered: a host's dashboard would need a
+  request per row to print who booked, and a guest's own trips list would show
+  a uuid. The join mirrors `GET /properties/{id}/reviews`, which has always
+  done this.
+
+  Columns are **listed rather than spread** on both sides of that join. `user`
+  carries an email and a phone number this endpoint has no use for, and naming
+  the booking columns means one added to the table later has to be added here
+  deliberately rather than appearing in the response the day it lands — the
+  same reason the payment history avoids a bare select. The join is inner:
+  `bookings.guestId` is NOT NULL and references `user`, so a left join would
+  quietly turn an impossible row into a booking with a null name.
+
+  Note that `user` is imported as a table in `bookings.handlers.ts`, so the
+  signed-in caller is `caller`, never `user`. A local named `user` shadows the
+  table, and the resulting bug typechecks in some positions.
+
+- **Every offset-paginated list orders by something unique.** `createdAt` and
+  `startDate` are not unique — two rows written in one transaction share a
+  timestamp — and without a total order the database may return tied rows in a
+  different order per page, so one row appears on two pages and another on
+  none. Each such list therefore ends its `orderBy` with `id`: the browse
+  list, bookings, reviews and blackouts. Lists that return everything
+  (amenities, images, rate overrides, a booking's payments) have no page
+  boundary for a row to fall through and do not need it.
+
+- **Blocking dates is not a one-way door.** `GET /blackouts` lists them and
+  `DELETE /blackouts/{id}` puts the nights back on sale. Both are admin-only:
+  `GET /properties/{id}/availability` already tells a guest which dates are
+  taken, but it carries no ids and deliberately no `reason` — why the owner
+  took dates off the market is host-internal. Removal needs the id, which is
+  the gap the list fills.
+
+  The list matches on **overlap, not containment**: a blackout that began
+  before the window and is still running is exactly the one a calendar showing
+  that window must offer for removal, and a `startDate >= from` filter hides
+  it. Both bounds are half-open like every other range here, so a blackout
+  ending on `from` (already released) and one starting on `to` are outside it.
+
+  Deleting needs no lock and catches no constraint — nothing references a
+  blackout, so the dates simply stop being held. It deletes and checks
+  existence in one statement, so a second removal reports 404 rather than a
+  second success.
+
+- **Amenities are a shared vocabulary, and a listing's set is replaced rather
+  than edited.** `GET /amenities` is the catalogue every listing picks from —
+  public, because it populates a picker and tells a guest nothing they cannot
+  already see. `POST /amenities` is admin-only, and `amenities.name` is UNIQUE
+  so two entries meaning the same thing cannot both be pickable. The name is
+  trimmed before it reaches that constraint, or a trailing space produces
+  exactly the duplicate the constraint exists to stop.
+
+  `PUT /properties/{id}/amenities` takes the **complete set** the listing ends
+  up with, not a change to apply. That makes a re-submitted form idempotent
+  and lets unticking a box be expressed by leaving it out — a
+  POST-one-at-a-time API would need a second call to remove anything. Repeated
+  ids are deduplicated rather than refused, since a checkbox list can submit
+  the same box twice and means the same thing either way.
+
+  Replacement is delete-then-insert, which is two statements, so it takes the
+  property `FOR UPDATE` lock — the same one bookings and blackouts take. Under
+  READ COMMITTED two concurrent replacements each delete only what their own
+  statement can see and then both insert, leaving the **union** of the two
+  sets, which is neither of the things that were asked for.
+
+  Testing that lock needs the **empty** set specifically. A replacement that
+  inserts blocks on a held `FOR UPDATE` anyway, because the foreign key to
+  `properties` takes a KEY SHARE lock that conflicts with it — so such a test
+  passes with the handler's own lock removed. An empty set only deletes and
+  touches no foreign key, so it blocks only if the handler took the lock
+  itself. Same distinction the rate-override delete test draws.
+
+  An id that is not in the catalogue is a 422 **naming it**, from a check
+  inside the transaction; the foreign key is still the backstop, since the
+  check is two statements away from the insert. Migration 0015 seeds the
+  catalogue, `ON CONFLICT DO NOTHING` so it is a no-op against a database that
+  already has those names. There is deliberately no delete: removing an
+  amenity would silently strip it from every listing that had it.
 
 - **A paid booking can be cancelled, and cancelling never moves money.**
   Plans change on both sides, so `confirmed → cancelled` is allowed for the

@@ -13,6 +13,8 @@ import {
   cancelBookingSchema,
   createBlackoutSchema,
   createBookingSchema,
+  listBlackoutsQuerySchema,
+  listBlackoutsResponseSchema,
   listBookingsQuerySchema,
   listBookingsResponseSchema,
   selectBlackoutSchema,
@@ -199,9 +201,70 @@ export const createBlackout = createRoute({
   },
 });
 
+export const listBlackouts = createRoute({
+  path: "/blackouts",
+  method: "get",
+  tags: ["Blackouts"],
+  summary: "List blocked date ranges",
+  description:
+    "Admin only. `GET /properties/{id}/availability` already tells a guest "
+    + "which dates are taken, but it returns no ids and deliberately does not "
+    + "carry the host's reason. This is what a calendar needs to offer "
+    + "removal — and the reason is host-internal, which is why it is not on "
+    + "the public endpoint.",
+  middleware: [requireAuth, requireRole("admin"), rateLimits.read()],
+  request: {
+    query: listBlackoutsQuerySchema,
+  },
+  responses: {
+    [HttpStatusCodes.TOO_MANY_REQUESTS]: jsonContent(
+      tooManyRequestsSchema,
+      "Rate limit exceeded",
+    ),
+    [HttpStatusCodes.OK]: jsonContent(listBlackoutsResponseSchema, "Blocked ranges"),
+    [HttpStatusCodes.UNAUTHORIZED]: jsonContent(unauthorizedSchema, "Not signed in"),
+    [HttpStatusCodes.FORBIDDEN]: jsonContent(forbiddenSchema, "Not an admin"),
+    [HttpStatusCodes.UNPROCESSABLE_ENTITY]: jsonContent(
+      createErrorSchema(listBlackoutsQuerySchema),
+      "The validation error(s)",
+    ),
+  },
+});
+
+export const removeBlackout = createRoute({
+  path: "/blackouts/{id}",
+  method: "delete",
+  tags: ["Blackouts"],
+  summary: "Put blocked dates back on sale",
+  description:
+    "Admin only. The nights become bookable immediately — nothing else holds "
+    + "them, and no booking references a blackout. Without this, blocking "
+    + "dates is a one-way door.",
+  middleware: [requireAuth, requireRole("admin"), rateLimits.write()],
+  request: {
+    params: IdUUIDParamsSchema,
+  },
+  responses: {
+    [HttpStatusCodes.TOO_MANY_REQUESTS]: jsonContent(
+      tooManyRequestsSchema,
+      "Rate limit exceeded",
+    ),
+    [HttpStatusCodes.NO_CONTENT]: { description: "Blackout removed" },
+    [HttpStatusCodes.UNAUTHORIZED]: jsonContent(unauthorizedSchema, "Not signed in"),
+    [HttpStatusCodes.FORBIDDEN]: jsonContent(forbiddenSchema, "Not an admin"),
+    [HttpStatusCodes.NOT_FOUND]: jsonContent(notFoundSchema, "Blackout not found"),
+    [HttpStatusCodes.UNPROCESSABLE_ENTITY]: jsonContent(
+      createErrorSchema(IdUUIDParamsSchema),
+      "Invalid id",
+    ),
+  },
+});
+
 export type AvailabilityRoute = typeof availability;
 export type CreateRoute = typeof create;
 export type ListRoute = typeof list;
 export type GetOneRoute = typeof getOne;
 export type CancelRoute = typeof cancel;
 export type CreateBlackoutRoute = typeof createBlackout;
+export type ListBlackoutsRoute = typeof listBlackouts;
+export type RemoveBlackoutRoute = typeof removeBlackout;

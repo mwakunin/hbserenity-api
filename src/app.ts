@@ -1,6 +1,7 @@
 import configureOpenAPI from "@/lib/configure-open-api";
 import createApp from "@/lib/create-app";
 import admin from "@/routes/admin/admin.index";
+import amenities from "@/routes/amenities/amenities.index";
 import bookings from "@/routes/bookings/bookings.index";
 import health from "@/routes/health.route";
 import images from "@/routes/images/images.index";
@@ -23,6 +24,7 @@ const routes = [
   reviews,
   rates,
   images,
+  amenities,
   admin,
 ] as const;
 

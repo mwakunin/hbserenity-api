@@ -9,6 +9,8 @@ const router = createRouter()
   .openapi(routes.list, handlers.list)
   .openapi(routes.getOne, handlers.getOne)
   .openapi(routes.cancel, handlers.cancel)
-  .openapi(routes.createBlackout, handlers.createBlackout);
+  .openapi(routes.createBlackout, handlers.createBlackout)
+  .openapi(routes.listBlackouts, handlers.listBlackouts)
+  .openapi(routes.removeBlackout, handlers.removeBlackout);
 
 export default router;

@@ -1,4 +1,4 @@
-import { avg, count, desc, eq } from "drizzle-orm";
+import { asc, avg, count, desc, eq } from "drizzle-orm";
 import * as HttpStatusCodes from "stoker/http-status-codes";
 import * as HttpStatusPhrases from "stoker/http-status-phrases";
 
@@ -96,7 +96,9 @@ export const listForProperty: AppRouteHandler<ListForPropertyRoute> = async (c) 
       .from(reviews)
       .innerJoin(user, eq(user.id, reviews.guestId))
       .where(where)
-      .orderBy(desc(reviews.createdAt))
+      // Unique tiebreaker, or a page boundary falling between two reviews
+      // with the same timestamp can repeat or drop one.
+      .orderBy(desc(reviews.createdAt), asc(reviews.id))
       .limit(limit)
       .offset((page - 1) * limit),
 

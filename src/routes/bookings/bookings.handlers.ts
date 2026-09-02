@@ -1,11 +1,12 @@
-import { and, count, eq, gt, inArray, lt } from "drizzle-orm";
+import { and, asc, count, eq, gt, inArray, lt } from "drizzle-orm";
 import * as HttpStatusCodes from "stoker/http-status-codes";
 import * as HttpStatusPhrases from "stoker/http-status-phrases";
 
 import type { AppRouteHandler } from "@/lib/types";
 
 import db from "@/db";
-import { bookings, properties, propertyBlackouts, propertyRateOverrides } from "@/db/schema";
+import { bookings, properties, propertyBlackouts, propertyRateOverrides, user } from "@/db/schema";
+import { HOLDING_STATUSES, overlapsWindow } from "@/lib/availability";
 import { todayInBusinessZone } from "@/lib/dates";
 import { isExclusionViolation } from "@/lib/db-errors";
 import { notifyBookingCancelled } from "@/lib/notifications";
@@ -17,15 +18,10 @@ import type {
   CreateBlackoutRoute,
   CreateRoute,
   GetOneRoute,
+  ListBlackoutsRoute,
   ListRoute,
+  RemoveBlackoutRoute,
 } from "./bookings.routes";
-
-/**
- * Booking statuses that actually hold dates against other guests — and so
- * exactly the ones that can still be called off. A booking that holds nothing
- * has either already happened or was cancelled once already.
- */
-const HOLDING_STATUSES = ["pending_payment", "confirmed"] as const;
 
 // Postgres raises 23P01 when an EXCLUDE constraint is violated — that's the
 // bookings_no_overlap guard firing. It is the real concurrency defence: two
@@ -55,15 +51,13 @@ export const availability: AppRouteHandler<AvailabilityRoute> = async (c) => {
       .where(and(
         eq(bookings.propertyId, id),
         inArray(bookings.status, [...HOLDING_STATUSES]),
-        lt(bookings.checkIn, to),
-        gt(bookings.checkOut, from),
+        overlapsWindow(bookings.checkIn, bookings.checkOut, from, to),
       )),
     db.select({ start: propertyBlackouts.startDate, end: propertyBlackouts.endDate })
       .from(propertyBlackouts)
       .where(and(
         eq(propertyBlackouts.propertyId, id),
-        lt(propertyBlackouts.startDate, to),
-        gt(propertyBlackouts.endDate, from),
+        overlapsWindow(propertyBlackouts.startDate, propertyBlackouts.endDate, from, to),
       )),
   ]);
 
@@ -77,7 +71,7 @@ export const availability: AppRouteHandler<AvailabilityRoute> = async (c) => {
 
 export const create: AppRouteHandler<CreateRoute> = async (c) => {
   const { propertyId, checkIn, checkOut, guestCount } = c.req.valid("json");
-  const user = c.var.user!;
+  const caller = c.var.user!;
 
   try {
     const result = await db.transaction(async (tx) => {
@@ -114,8 +108,12 @@ export const create: AppRouteHandler<CreateRoute> = async (c) => {
         .from(propertyBlackouts)
         .where(and(
           eq(propertyBlackouts.propertyId, propertyId),
-          lt(propertyBlackouts.startDate, checkOut),
-          gt(propertyBlackouts.endDate, checkIn),
+          overlapsWindow(
+            propertyBlackouts.startDate,
+            propertyBlackouts.endDate,
+            checkIn,
+            checkOut,
+          ),
         ));
 
       if (blackoutHits > 0)
@@ -132,8 +130,12 @@ export const create: AppRouteHandler<CreateRoute> = async (c) => {
         .from(propertyRateOverrides)
         .where(and(
           eq(propertyRateOverrides.propertyId, propertyId),
-          lt(propertyRateOverrides.startDate, checkOut),
-          gt(propertyRateOverrides.endDate, checkIn),
+          overlapsWindow(
+            propertyRateOverrides.startDate,
+            propertyRateOverrides.endDate,
+            checkIn,
+            checkOut,
+          ),
         ));
 
       // Server-side price, snapshotted onto the row. Never from the client.
@@ -146,7 +148,7 @@ export const create: AppRouteHandler<CreateRoute> = async (c) => {
 
       const [booking] = await tx.insert(bookings).values({
         propertyId,
-        guestId: user.id,
+        guestId: caller.id,
         checkIn,
         checkOut,
         guestCount,
@@ -200,20 +202,59 @@ export const create: AppRouteHandler<CreateRoute> = async (c) => {
 
 export const list: AppRouteHandler<ListRoute> = async (c) => {
   const { status, page, limit } = c.req.valid("query");
-  const user = c.var.user!;
+  const caller = c.var.user!;
 
   const filters = [];
 
   // A guest may only ever see their own bookings.
-  if (user.role !== "admin")
-    filters.push(eq(bookings.guestId, user.id));
+  if (caller.role !== "admin")
+    filters.push(eq(bookings.guestId, caller.id));
   if (status)
     filters.push(eq(bookings.status, status));
 
   const where = filters.length > 0 ? and(...filters) : undefined;
 
   const [rows, [{ total }]] = await Promise.all([
-    db.select().from(bookings).where(where).limit(limit).offset((page - 1) * limit).orderBy(bookings.createdAt),
+    /*
+     * Columns are listed rather than spread, and the join takes the guest's
+     * display name only. `guestId` on its own cannot be rendered: a host's
+     * dashboard would need a request per row to print who booked, and a
+     * guest's own trips list would show a uuid.
+     *
+     * Naming the columns also means a column added to `bookings` later has to
+     * be added here deliberately, rather than appearing in the response the
+     * day it lands — the same reason the payment history avoids a bare
+     * select. `user` carries an email and a phone number that nothing on this
+     * endpoint needs.
+     */
+    db.select({
+      id: bookings.id,
+      propertyId: bookings.propertyId,
+      guestId: bookings.guestId,
+      guestName: user.name,
+      checkIn: bookings.checkIn,
+      checkOut: bookings.checkOut,
+      guestCount: bookings.guestCount,
+      status: bookings.status,
+      totalAmountCents: bookings.totalAmountCents,
+      currency: bookings.currency,
+      cancelledAt: bookings.cancelledAt,
+      cancellationReason: bookings.cancellationReason,
+      cancelledBy: bookings.cancelledBy,
+      createdAt: bookings.createdAt,
+      updatedAt: bookings.updatedAt,
+    })
+      .from(bookings)
+      // Inner: `bookings.guestId` is NOT NULL and references `user`, so a
+      // booking without one cannot exist. A left join would quietly turn a
+      // broken row into a booking with a null name instead of failing loudly.
+      .innerJoin(user, eq(user.id, bookings.guestId))
+      .where(where)
+      .limit(limit)
+      .offset((page - 1) * limit)
+      // Two bookings created in the same transaction share a timestamp,
+      // which offset pagination cannot order stably on its own.
+      .orderBy(asc(bookings.createdAt), asc(bookings.id)),
     db.select({ total: count() }).from(bookings).where(where),
   ]);
 
@@ -225,13 +266,13 @@ export const list: AppRouteHandler<ListRoute> = async (c) => {
 
 export const getOne: AppRouteHandler<GetOneRoute> = async (c) => {
   const { id } = c.req.valid("param");
-  const user = c.var.user!;
+  const caller = c.var.user!;
 
   const [booking] = await db.select().from(bookings).where(eq(bookings.id, id));
 
   // 404 rather than 403 for someone else's booking — don't confirm that an id
   // exists to a caller who has no business knowing.
-  if (!booking || (user.role !== "admin" && booking.guestId !== user.id)) {
+  if (!booking || (caller.role !== "admin" && booking.guestId !== caller.id)) {
     return c.json(
       { message: HttpStatusPhrases.NOT_FOUND },
       HttpStatusCodes.NOT_FOUND,
@@ -246,11 +287,11 @@ export const cancel: AppRouteHandler<CancelRoute> = async (c) => {
   // The body is optional: cancelling an unpaid hold needs no explanation, so
   // a bare POST is valid and arrives here as undefined.
   const { reason } = c.req.valid("json") ?? {};
-  const user = c.var.user!;
+  const caller = c.var.user!;
 
   const [booking] = await db.select().from(bookings).where(eq(bookings.id, id));
 
-  if (!booking || (user.role !== "admin" && booking.guestId !== user.id)) {
+  if (!booking || (caller.role !== "admin" && booking.guestId !== caller.id)) {
     return c.json(
       { message: HttpStatusPhrases.NOT_FOUND },
       HttpStatusCodes.NOT_FOUND,
@@ -304,7 +345,7 @@ export const cancel: AppRouteHandler<CancelRoute> = async (c) => {
       status: "cancelled",
       cancelledAt: new Date(),
       cancellationReason: reason ?? null,
-      cancelledBy: user.id,
+      cancelledBy: caller.id,
     })
     .where(and(eq(bookings.id, id), eq(bookings.status, booking.status)))
     .returning();
@@ -348,8 +389,7 @@ export const createBlackout: AppRouteHandler<CreateBlackoutRoute> = async (c) =>
         .where(and(
           eq(bookings.propertyId, propertyId),
           inArray(bookings.status, [...HOLDING_STATUSES]),
-          lt(bookings.checkIn, endDate),
-          gt(bookings.checkOut, startDate),
+          overlapsWindow(bookings.checkIn, bookings.checkOut, startDate, endDate),
         ));
 
       if (bookedHits > 0)
@@ -386,4 +426,68 @@ export const createBlackout: AppRouteHandler<CreateBlackoutRoute> = async (c) =>
     }
     throw err;
   }
+};
+
+export const listBlackouts: AppRouteHandler<ListBlackoutsRoute> = async (c) => {
+  const { propertyId, from, to, page, limit } = c.req.valid("query");
+
+  const filters = [];
+
+  if (propertyId)
+    filters.push(eq(propertyBlackouts.propertyId, propertyId));
+
+  /*
+   * Overlap, not containment. A blackout that started last month and runs
+   * through next week is exactly the one a calendar showing this week needs
+   * to offer for removal, and a `startDate >= from` filter would hide it.
+   *
+   * Half-open on both sides, like every other range here: a blackout ending
+   * on `from` has already released that day, and one starting on `to` falls
+   * outside the window.
+   */
+  if (to)
+    filters.push(lt(propertyBlackouts.startDate, to));
+  if (from)
+    filters.push(gt(propertyBlackouts.endDate, from));
+
+  const where = filters.length > 0 ? and(...filters) : undefined;
+
+  const [data, [{ total }]] = await Promise.all([
+    db.select()
+      .from(propertyBlackouts)
+      .where(where)
+      .limit(limit)
+      .offset((page - 1) * limit)
+      // `id` breaks a tie on `startDate`. Ordering by a non-unique column
+      // alone leaves offset pagination no stable order, so a row can
+      // appear on two pages or on neither.
+      .orderBy(asc(propertyBlackouts.startDate), asc(propertyBlackouts.id)),
+    db.select({ total: count() }).from(propertyBlackouts).where(where),
+  ]);
+
+  return c.json({
+    data,
+    meta: { page, limit, total, totalPages: Math.ceil(total / limit) },
+  }, HttpStatusCodes.OK);
+};
+
+export const removeBlackout: AppRouteHandler<RemoveBlackoutRoute> = async (c) => {
+  const { id } = c.req.valid("param");
+
+  // Nothing references a blackout, so this needs neither a lock nor a
+  // constraint to catch: the dates simply stop being held. The returning()
+  // makes the delete and the existence check one statement, so two concurrent
+  // deletes give one 204 and one 404 rather than both claiming success.
+  const [deleted] = await db.delete(propertyBlackouts)
+    .where(eq(propertyBlackouts.id, id))
+    .returning({ id: propertyBlackouts.id });
+
+  if (!deleted) {
+    return c.json(
+      { message: HttpStatusPhrases.NOT_FOUND },
+      HttpStatusCodes.NOT_FOUND,
+    );
+  }
+
+  return c.body(null, HttpStatusCodes.NO_CONTENT);
 };

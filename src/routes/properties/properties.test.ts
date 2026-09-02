@@ -724,4 +724,145 @@ describe("properties routes", () => {
       expect(res.status).toBe(404);
     });
   });
+  describe("availability filter", () => {
+    let admin: { id: string; headers: Record<string, string> };
+    let guestId: string;
+    let taken: { id: string };
+
+    async function hold(propertyId: string, checkIn: string, checkOut: string) {
+      await db.insert(bookings).values({
+        propertyId,
+        guestId,
+        checkIn,
+        checkOut,
+        guestCount: 2,
+        totalAmountCents: 2_550_000,
+      });
+    }
+
+    async function search(query: string) {
+      const res = await app.request(`/properties?${query}`);
+      return { status: res.status, body: await res.json() };
+    }
+
+    beforeEach(async () => {
+      admin = await signIn(nextPhone(), "admin");
+      const guest = await signIn(nextPhone());
+      guestId = guest.id;
+      // Kept unbound: it is the listing every search must still return.
+      await makeProperty(admin.id, { title: "Free one" });
+      taken = await makeProperty(admin.id, { title: "Taken one" });
+    });
+
+    it("hides a listing booked across the requested dates", async () => {
+      await hold(taken.id, dayFromNow(10), dayFromNow(15));
+
+      const { body } = await search(`checkIn=${dayFromNow(11)}&checkOut=${dayFromNow(13)}`);
+
+      expect(body.data.map((p: { title: string }) => p.title)).toEqual(["Free one"]);
+      expect(body.meta.total).toBe(1);
+    });
+
+    // Half-open, exactly as the booking constraint treats it: the checkout day
+    // is on sale again. Getting this wrong makes back-to-back stays unfindable.
+    it("still offers a listing whose stay ends on the requested check-in", async () => {
+      await hold(taken.id, dayFromNow(5), dayFromNow(10));
+
+      const { body } = await search(`checkIn=${dayFromNow(10)}&checkOut=${dayFromNow(13)}`);
+
+      expect(body.data.map((p: { title: string }) => p.title).sort())
+        .toEqual(["Free one", "Taken one"]);
+    });
+
+    it("still offers a listing whose stay starts on the requested check-out", async () => {
+      await hold(taken.id, dayFromNow(13), dayFromNow(20));
+
+      const { body } = await search(`checkIn=${dayFromNow(10)}&checkOut=${dayFromNow(13)}`);
+
+      expect(body.data.map((p: { title: string }) => p.title).sort())
+        .toEqual(["Free one", "Taken one"]);
+    });
+
+    // A cancelled booking holds nothing — the same list the overlap constraint
+    // uses, so the browse filter and the constraint cannot disagree.
+    it("offers a listing again once its booking is cancelled", async () => {
+      await db.insert(bookings).values({
+        propertyId: taken.id,
+        guestId,
+        checkIn: dayFromNow(10),
+        checkOut: dayFromNow(15),
+        guestCount: 2,
+        totalAmountCents: 2_550_000,
+        status: "cancelled",
+        cancelledAt: new Date(),
+      });
+
+      const { body } = await search(`checkIn=${dayFromNow(11)}&checkOut=${dayFromNow(13)}`);
+
+      expect(body.data).toHaveLength(2);
+    });
+
+    // Dates the host took off the market are not for sale either.
+    it("hides a listing blacked out across the requested dates", async () => {
+      await app.request("/blackouts", {
+        method: "POST",
+        headers: { "content-type": "application/json", ...admin.headers },
+        body: JSON.stringify({
+          propertyId: taken.id,
+          startDate: dayFromNow(10),
+          endDate: dayFromNow(15),
+        }),
+      });
+
+      const { body } = await search(`checkIn=${dayFromNow(11)}&checkOut=${dayFromNow(13)}`);
+
+      expect(body.data.map((p: { title: string }) => p.title)).toEqual(["Free one"]);
+    });
+
+    // Several overlapping bookings must exclude the listing once, not repeat
+    // it — the reason this is NOT EXISTS rather than a join.
+    it("excludes a listing once however many bookings overlap", async () => {
+      await hold(taken.id, dayFromNow(10), dayFromNow(12));
+      await hold(taken.id, dayFromNow(12), dayFromNow(14));
+      await hold(taken.id, dayFromNow(14), dayFromNow(16));
+
+      const { body } = await search(`checkIn=${dayFromNow(11)}&checkOut=${dayFromNow(15)}`);
+
+      expect(body.data.map((p: { title: string }) => p.title)).toEqual(["Free one"]);
+      expect(body.meta.total).toBe(1);
+    });
+
+    it("combines with the other filters", async () => {
+      await makeProperty(admin.id, { title: "Nyali flat", town: "Nyali" });
+      await hold(taken.id, dayFromNow(10), dayFromNow(15));
+
+      const { body } = await search(
+        `town=Diani&checkIn=${dayFromNow(11)}&checkOut=${dayFromNow(13)}`,
+      );
+
+      expect(body.data.map((p: { title: string }) => p.title)).toEqual(["Free one"]);
+    });
+
+    // Ignoring the lone date would show dates that are taken as available.
+    it.each(["checkIn", "checkOut"])("422s %s without the other", async (param) => {
+      const { status } = await search(`${param}=${dayFromNow(10)}`);
+      expect(status).toBe(422);
+    });
+
+    it("422s a check-out on or before the check-in", async () => {
+      const same = await search(`checkIn=${dayFromNow(10)}&checkOut=${dayFromNow(10)}`);
+      const backwards = await search(`checkIn=${dayFromNow(13)}&checkOut=${dayFromNow(10)}`);
+
+      expect(same.status).toBe(422);
+      expect(backwards.status).toBe(422);
+    });
+
+    it("returns everything when no dates are given", async () => {
+      await hold(taken.id, dayFromNow(10), dayFromNow(15));
+
+      const { body } = await search("");
+
+      expect(body.data).toHaveLength(2);
+    });
+  });
 });

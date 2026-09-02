@@ -1,11 +1,30 @@
 import { z } from "@hono/zod-openapi";
 import { createSelectSchema } from "drizzle-zod";
+import { z as z4 } from "zod/v4";
 
 import { bookings, propertyBlackouts } from "@/db/schema";
 import { MAX_STAY_NIGHTS, nightsBetween } from "@/lib/pricing";
 import { toZodV4SchemaTyped } from "@/lib/zod-utils";
 
-export const selectBookingSchema = toZodV4SchemaTyped(createSelectSchema(bookings));
+// Kept unwrapped so the list item can `.extend()` it — toZodV4SchemaTyped
+// casts away the object shape that composition needs.
+const rawSelectBooking = createSelectSchema(bookings);
+
+export const selectBookingSchema = toZodV4SchemaTyped(rawSelectBooking);
+
+/**
+ * A booking as it appears in a list, plus who made it.
+ *
+ * `guestId` alone cannot be rendered: a dashboard would have to fetch a user
+ * per row to print a name, and the guest's own trips list would show a uuid.
+ * The display name only — never their email or phone, which the caller has no
+ * need for here and which would then have to be redacted from a shared cache.
+ */
+export const bookingListItemSchema = toZodV4SchemaTyped(
+  rawSelectBooking.extend({
+    guestName: z4.string(),
+  }),
+);
 
 export const selectBlackoutSchema = toZodV4SchemaTyped(
   createSelectSchema(propertyBlackouts),
@@ -75,7 +94,36 @@ export const listBookingsQuerySchema = z.object({
 });
 
 export const listBookingsResponseSchema = z.object({
-  data: z.array(selectBookingSchema),
+  data: z.array(bookingListItemSchema),
+  meta: z.object({
+    page: z.number().int(),
+    limit: z.number().int(),
+    total: z.number().int(),
+    totalPages: z.number().int(),
+  }),
+});
+
+/**
+ * Which blackouts to list.
+ *
+ * `propertyId` is optional so the whole calendar can be reviewed at once, but
+ * a calendar view passes it. `from`/`to` bound the window the same half-open
+ * way as everything else: a blackout is included when it overlaps the window,
+ * so one that started before `from` and is still running shows up.
+ */
+export const listBlackoutsQuerySchema = z.object({
+  propertyId: z.string().uuid().optional(),
+  from: dateString.optional(),
+  to: dateString.optional(),
+  page: z.coerce.number().int().positive().default(1),
+  limit: z.coerce.number().int().positive().max(100).default(20),
+}).refine(
+  q => q.from === undefined || q.to === undefined || q.to > q.from,
+  { message: "to must be after from", path: ["to"] },
+);
+
+export const listBlackoutsResponseSchema = z.object({
+  data: z.array(selectBlackoutSchema),
   meta: z.object({
     page: z.number().int(),
     limit: z.number().int(),

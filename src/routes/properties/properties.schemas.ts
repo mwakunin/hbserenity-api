@@ -106,9 +106,27 @@ export const listPropertiesQuerySchema = z.object({
     .enum(["draft", "active", "inactive", "all"])
     .optional()
     .openapi({ example: "all" }),
+  /**
+   * Only listings free for the whole stay.
+   *
+   * Half-open like every other range here: a listing whose booking ends on
+   * `checkIn` is free, and one whose booking starts on `checkOut` is too.
+   * Without these a search bar carrying dates cannot filter on them, and the
+   * alternative is an availability request per listing on the page.
+   */
+  checkIn: z.iso.date().optional().openapi({ example: "2026-09-10" }),
+  checkOut: z.iso.date().optional().openapi({ example: "2026-09-14" }),
   page: z.coerce.number().int().positive().default(1),
   limit: z.coerce.number().int().positive().max(100).default(20),
-});
+}).refine(
+  // One date alone cannot answer "is this free?", and silently ignoring the
+  // other would show a guest listings that are taken on dates they asked for.
+  q => (q.checkIn === undefined) === (q.checkOut === undefined),
+  { message: "Provide both checkIn and checkOut, or neither", path: ["checkOut"] },
+).refine(
+  q => q.checkIn === undefined || q.checkOut === undefined || q.checkOut > q.checkIn,
+  { message: "checkOut must be after checkIn", path: ["checkOut"] },
+);
 
 export const propertyWithImagesSchema = toZodV4SchemaTyped(
   rawSelectProperty.extend({
