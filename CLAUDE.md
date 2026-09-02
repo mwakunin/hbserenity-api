@@ -424,6 +424,15 @@ Non-default dev ports are deliberate: another project on this machine binds
   signed-in caller is `caller`, never `user`. A local named `user` shadows the
   table, and the resulting bug typechecks in some positions.
 
+- **Every offset-paginated list orders by something unique.** `createdAt` and
+  `startDate` are not unique — two rows written in one transaction share a
+  timestamp — and without a total order the database may return tied rows in a
+  different order per page, so one row appears on two pages and another on
+  none. Each such list therefore ends its `orderBy` with `id`: the browse
+  list, bookings, reviews and blackouts. Lists that return everything
+  (amenities, images, rate overrides, a booking's payments) have no page
+  boundary for a row to fall through and do not need it.
+
 - **Blocking dates is not a one-way door.** `GET /blackouts` lists them and
   `DELETE /blackouts/{id}` puts the nights back on sale. Both are admin-only:
   `GET /properties/{id}/availability` already tells a guest which dates are

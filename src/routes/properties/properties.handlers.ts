@@ -1,4 +1,4 @@
-import { and, count, eq, gte, inArray, lte, notExists, sql } from "drizzle-orm";
+import { and, asc, count, eq, gte, inArray, lte, notExists, sql } from "drizzle-orm";
 import * as HttpStatusCodes from "stoker/http-status-codes";
 import * as HttpStatusPhrases from "stoker/http-status-phrases";
 
@@ -188,7 +188,9 @@ export const list: AppRouteHandler<ListRoute> = async (c) => {
       },
       limit,
       offset: (page - 1) * limit,
-      orderBy: properties.createdAt,
+      // Unique tiebreaker: `createdAt` alone is not a total order, and
+      // offset pagination needs one.
+      orderBy: [asc(properties.createdAt), asc(properties.id)],
     }),
     db.select({ total: count() }).from(properties).where(where),
   ]);

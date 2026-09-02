@@ -5,7 +5,7 @@ import type { TestUser } from "@/test/helpers";
 
 import app from "@/app";
 import db from "@/db";
-import { bookings, properties } from "@/db/schema";
+import { bookings, properties, propertyBlackouts } from "@/db/schema";
 import { dayFromNow, makeProperty, nextEmail, nextPhone, resetDb, signIn, signUpWithEmail } from "@/test/helpers";
 
 async function book(
@@ -496,6 +496,45 @@ describe("bookings routes", () => {
 
         const res = await removeBlackout(guest, id);
         expect(res.status).toBe(403);
+      });
+
+      /*
+       * Offset pagination needs a total order. `startDate` is not unique, so
+       * with it alone the database is free to return the tied rows in any
+       * order per page — the same row can land on two pages while another
+       * lands on none.
+       *
+       * The ids are fixed so the lowest is inserted LAST: without the
+       * tiebreaker the pages come back in insertion order, which is the
+       * reverse of what the tiebreaker gives.
+       */
+      it("pages tied start dates in a stable order", async () => {
+        const ids = [
+          "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+          "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+          "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        ];
+
+        // One property each: the EXCLUDE constraint forbids two blackouts
+        // over the same dates on one property.
+        for (const id of ids) {
+          const property = await makeProperty(admin.id);
+          await db.insert(propertyBlackouts).values({
+            id,
+            propertyId: property.id,
+            startDate: dayFromNow(10),
+            endDate: dayFromNow(15),
+          });
+        }
+
+        const paged: string[] = [];
+        for (let page = 1; page <= 3; page++) {
+          const { data } = await (await listBlackouts(admin, `?page=${page}&limit=1`)).json();
+          paged.push(...data.map((b: { id: string }) => b.id));
+        }
+
+        expect(paged).toEqual([...ids].sort());
+        expect(new Set(paged).size).toBe(3);
       });
 
       // Pins the contract, not the race: two removals of one blackout must

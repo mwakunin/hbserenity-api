@@ -252,7 +252,9 @@ export const list: AppRouteHandler<ListRoute> = async (c) => {
       .where(where)
       .limit(limit)
       .offset((page - 1) * limit)
-      .orderBy(bookings.createdAt),
+      // Two bookings created in the same transaction share a timestamp,
+      // which offset pagination cannot order stably on its own.
+      .orderBy(asc(bookings.createdAt), asc(bookings.id)),
     db.select({ total: count() }).from(bookings).where(where),
   ]);
 
@@ -456,7 +458,10 @@ export const listBlackouts: AppRouteHandler<ListBlackoutsRoute> = async (c) => {
       .where(where)
       .limit(limit)
       .offset((page - 1) * limit)
-      .orderBy(asc(propertyBlackouts.startDate)),
+      // `id` breaks a tie on `startDate`. Ordering by a non-unique column
+      // alone leaves offset pagination no stable order, so a row can
+      // appear on two pages or on neither.
+      .orderBy(asc(propertyBlackouts.startDate), asc(propertyBlackouts.id)),
     db.select({ total: count() }).from(propertyBlackouts).where(where),
   ]);
 
