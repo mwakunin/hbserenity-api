@@ -61,22 +61,6 @@ function checkViolationBody(err: unknown) {
   };
 }
 
-/**
- * The one photo that represents a listing.
- *
- * `property_images_one_cover_idx` guarantees at most one cover per property,
- * but not that there is one — a host can upload photos and never pick. Falling
- * back to the lowest `order` means a listing with pictures always shows one,
- * rather than looking photoless because nobody pressed a button.
- */
-function coverOf<T extends { isCover: boolean; order: number }>(images: T[]): T | null {
-  if (images.length === 0)
-    return null;
-
-  return images.find(image => image.isCover)
-    ?? [...images].sort((a, b) => a.order - b.order)[0];
-}
-
 export const list: AppRouteHandler<ListRoute> = async (c) => {
   const { county, town, propertyType, minGuests, maxPriceCents, status, page, limit }
     = c.req.valid("query");
@@ -119,11 +103,35 @@ export const list: AppRouteHandler<ListRoute> = async (c) => {
   const where = filters.length > 0 ? and(...filters) : undefined;
 
   const [rows, [{ total }]] = await Promise.all([
-    // `with` is a second query, not a join, so a property is still one row —
-    // no fan-out to collapse and no duplicated listing in the page.
+    /*
+     * The cover is chosen by the database, and only the cover is read.
+     *
+     * `property_images_one_cover_idx` guarantees at most one cover per
+     * property but not that there is one — a host can upload photos and never
+     * pick. Ordering cover-first and falling back to the lowest `order` means
+     * a listing with pictures always shows one rather than looking photoless
+     * because nobody pressed a button; `id` only breaks a tie on `order`, so
+     * the same photo comes back on every request instead of flapping.
+     *
+     * `limit: 1` is what keeps this response bounded. Drizzle builds the
+     * relation as a lateral subquery — one row per listing, no fan-out to
+     * collapse — and the limit applies inside it, per listing. Reading whole
+     * galleries and picking in JS instead would make transfer, memory and
+     * sorting work grow with how many photos a host happened to upload, to
+     * return exactly one of them.
+     */
     db.query.properties.findMany({
       where,
-      with: { images: true },
+      with: {
+        images: {
+          limit: 1,
+          orderBy: (image, { asc, desc }) => [
+            desc(image.isCover),
+            asc(image.order),
+            asc(image.id),
+          ],
+        },
+      },
       limit,
       offset: (page - 1) * limit,
       orderBy: properties.createdAt,
@@ -134,7 +142,7 @@ export const list: AppRouteHandler<ListRoute> = async (c) => {
   return c.json({
     data: rows.map(({ images, ...property }) => ({
       ...property,
-      coverImage: coverOf(images),
+      coverImage: images[0] ?? null,
     })),
     meta: {
       page,

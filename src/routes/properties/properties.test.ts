@@ -329,6 +329,39 @@ describe("properties routes", () => {
         expect(data[0].coverImage.url).toBe("https://cdn.test/first.jpg");
       });
 
+      // The database picks the cover now, so two photos sharing an `order`
+      // need a tiebreaker or the answer is whichever row the scan reaches
+      // first — insertion order today, something else after a vacuum or a
+      // plan change, and the grid flaps for a listing nobody touched. The
+      // ids here are fixed so the lowest one is NOT the first inserted:
+      // without the tiebreaker this returns the other photo.
+      it("breaks an order tie on id rather than on scan order", async () => {
+        const admin = await signIn(nextPhone(), "admin");
+        const property = await makeProperty(admin.id);
+
+        await db.insert(propertyImages).values([
+          {
+            id: "ffffffff-ffff-4fff-bfff-ffffffffffff",
+            propertyId: property.id,
+            url: "https://cdn.test/inserted-first.jpg",
+            fileId: "tie-high-id",
+            order: 0,
+            isCover: false,
+          },
+          {
+            id: "00000000-0000-4000-8000-000000000000",
+            propertyId: property.id,
+            url: "https://cdn.test/lowest-id.jpg",
+            fileId: "tie-low-id",
+            order: 0,
+            isCover: false,
+          },
+        ]);
+
+        const { data } = await (await app.request("/properties")).json();
+        expect(data[0].coverImage.url).toBe("https://cdn.test/lowest-id.jpg");
+      });
+
       it("is null for a listing with no photos", async () => {
         const admin = await signIn(nextPhone(), "admin");
         await makeProperty(admin.id);
@@ -358,8 +391,9 @@ describe("properties routes", () => {
         expect(data[0].images).toBeUndefined();
       });
 
-      // `with` is a second query rather than a join, so a listing with many
-      // photos must still be one row in the page.
+      // The images relation is a lateral subquery limited to one row per
+      // listing, not a join, so a listing with many photos must still be one
+      // row in the page.
       it("does not duplicate a listing that has several photos", async () => {
         const admin = await signIn(nextPhone(), "admin");
         const property = await makeProperty(admin.id);

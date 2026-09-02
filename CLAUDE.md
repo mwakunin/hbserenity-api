@@ -311,17 +311,22 @@ Non-default dev ports are deliberate: another project on this machine binds
   `sentEmails` rather than calling Resend, so senders must still run or the
   tests assert nothing.
 
-- **The browse list carries a cover photo, and only a cover.** `GET
-  /properties` returns `coverImage` per listing so a grid needs no request per
-  card; the full gallery stays on `GET /properties/{id}`. A host can upload any
+- **The browse list carries a cover photo, and only a cover.**
+  `GET /properties` returns `coverImage` per listing so a grid needs no request
+  per card; the full gallery stays on `GET /properties/{id}`. A host can upload any
   number of photos, and the size of a list response must not depend on that.
-  `coverOf()` falls back to the lowest `order` when nobody set a cover — a
-  listing with pictures should never look photoless because a button was never
-  pressed.
+  The cover is picked **in the database**, not in JS: the `images` relation is
+  read with `limit: 1` ordered cover-first, then lowest `order`, then `id`.
+  Drizzle builds the relation as a lateral subquery, so that limit applies per
+  listing — a gallery of any size still transfers one row, and the response
+  size cannot grow with how many photos a host uploaded. Reading whole
+  galleries to keep one of each is the regression to watch for. The `order`
+  fallback means a listing with pictures never looks photoless because the
+  cover button was never pressed; `id` only breaks a tie, so the chosen photo
+  does not flap between requests.
 
-  `with: { images: true }` is a second query rather than a join, so a listing
-  with many photos is still one row in the page. A join would fan out and
-  repeat the listing.
+  A lateral subquery is not a join in the fan-out sense — a listing is still
+  one row in the page. A real join would repeat the listing per photo.
 
 - **`status` on the browse list is admin-only, and "active" is an
   unconditional floor.** The branch that widens the filter is the exception, so
@@ -753,6 +758,7 @@ Deliberately deferred — don't assume these exist:
   part-paid, "is this booking paid?" stops being a single comparison, and
   reconciliation, the attention list, refunds and the cancellation email each
   need their own answer to it.
+
 - **A booking idempotency key**, so a double-tapped "Book now" can create two
   bookings for different dates. The same dates are already impossible — the
   overlap constraint sees to that.
