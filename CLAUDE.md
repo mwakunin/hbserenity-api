@@ -385,6 +385,24 @@ Non-default dev ports are deliberate: another project on this machine binds
   check-then-update cannot prevent it — both requests read "no other cover".
   The handlers clear then set for the ordinary case and map `23505` to 409.
 
+- **Blocking dates is not a one-way door.** `GET /blackouts` lists them and
+  `DELETE /blackouts/{id}` puts the nights back on sale. Both are admin-only:
+  `GET /properties/{id}/availability` already tells a guest which dates are
+  taken, but it carries no ids and deliberately no `reason` — why the owner
+  took dates off the market is host-internal. Removal needs the id, which is
+  the gap the list fills.
+
+  The list matches on **overlap, not containment**: a blackout that began
+  before the window and is still running is exactly the one a calendar showing
+  that window must offer for removal, and a `startDate >= from` filter hides
+  it. Both bounds are half-open like every other range here, so a blackout
+  ending on `from` (already released) and one starting on `to` are outside it.
+
+  Deleting needs no lock and catches no constraint — nothing references a
+  blackout, so the dates simply stop being held. It deletes and checks
+  existence in one statement, so a second removal reports 404 rather than a
+  second success.
+
 - **Amenities are a shared vocabulary, and a listing's set is replaced rather
   than edited.** `GET /amenities` is the catalogue every listing picks from —
   public, because it populates a picker and tells a guest nothing they cannot

@@ -84,6 +84,35 @@ export const listBookingsResponseSchema = z.object({
   }),
 });
 
+/**
+ * Which blackouts to list.
+ *
+ * `propertyId` is optional so the whole calendar can be reviewed at once, but
+ * a calendar view passes it. `from`/`to` bound the window the same half-open
+ * way as everything else: a blackout is included when it overlaps the window,
+ * so one that started before `from` and is still running shows up.
+ */
+export const listBlackoutsQuerySchema = z.object({
+  propertyId: z.string().uuid().optional(),
+  from: dateString.optional(),
+  to: dateString.optional(),
+  page: z.coerce.number().int().positive().default(1),
+  limit: z.coerce.number().int().positive().max(100).default(20),
+}).refine(
+  q => q.from === undefined || q.to === undefined || q.to > q.from,
+  { message: "to must be after from", path: ["to"] },
+);
+
+export const listBlackoutsResponseSchema = z.object({
+  data: z.array(selectBlackoutSchema),
+  meta: z.object({
+    page: z.number().int(),
+    limit: z.number().int(),
+    total: z.number().int(),
+    totalPages: z.number().int(),
+  }),
+});
+
 export const createBlackoutSchema = z.object({
   propertyId: z.string().uuid(),
   startDate: dateString,

@@ -1,4 +1,4 @@
-import { and, count, eq, gt, inArray, lt } from "drizzle-orm";
+import { and, asc, count, eq, gt, inArray, lt } from "drizzle-orm";
 import * as HttpStatusCodes from "stoker/http-status-codes";
 import * as HttpStatusPhrases from "stoker/http-status-phrases";
 
@@ -17,7 +17,9 @@ import type {
   CreateBlackoutRoute,
   CreateRoute,
   GetOneRoute,
+  ListBlackoutsRoute,
   ListRoute,
+  RemoveBlackoutRoute,
 } from "./bookings.routes";
 
 /**
@@ -386,4 +388,65 @@ export const createBlackout: AppRouteHandler<CreateBlackoutRoute> = async (c) =>
     }
     throw err;
   }
+};
+
+export const listBlackouts: AppRouteHandler<ListBlackoutsRoute> = async (c) => {
+  const { propertyId, from, to, page, limit } = c.req.valid("query");
+
+  const filters = [];
+
+  if (propertyId)
+    filters.push(eq(propertyBlackouts.propertyId, propertyId));
+
+  /*
+   * Overlap, not containment. A blackout that started last month and runs
+   * through next week is exactly the one a calendar showing this week needs
+   * to offer for removal, and a `startDate >= from` filter would hide it.
+   *
+   * Half-open on both sides, like every other range here: a blackout ending
+   * on `from` has already released that day, and one starting on `to` falls
+   * outside the window.
+   */
+  if (to)
+    filters.push(lt(propertyBlackouts.startDate, to));
+  if (from)
+    filters.push(gt(propertyBlackouts.endDate, from));
+
+  const where = filters.length > 0 ? and(...filters) : undefined;
+
+  const [data, [{ total }]] = await Promise.all([
+    db.select()
+      .from(propertyBlackouts)
+      .where(where)
+      .limit(limit)
+      .offset((page - 1) * limit)
+      .orderBy(asc(propertyBlackouts.startDate)),
+    db.select({ total: count() }).from(propertyBlackouts).where(where),
+  ]);
+
+  return c.json({
+    data,
+    meta: { page, limit, total, totalPages: Math.ceil(total / limit) },
+  }, HttpStatusCodes.OK);
+};
+
+export const removeBlackout: AppRouteHandler<RemoveBlackoutRoute> = async (c) => {
+  const { id } = c.req.valid("param");
+
+  // Nothing references a blackout, so this needs neither a lock nor a
+  // constraint to catch: the dates simply stop being held. The returning()
+  // makes the delete and the existence check one statement, so two concurrent
+  // deletes give one 204 and one 404 rather than both claiming success.
+  const [deleted] = await db.delete(propertyBlackouts)
+    .where(eq(propertyBlackouts.id, id))
+    .returning({ id: propertyBlackouts.id });
+
+  if (!deleted) {
+    return c.json(
+      { message: HttpStatusPhrases.NOT_FOUND },
+      HttpStatusCodes.NOT_FOUND,
+    );
+  }
+
+  return c.body(null, HttpStatusCodes.NO_CONTENT);
 };
