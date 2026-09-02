@@ -45,3 +45,64 @@ export function todayInBusinessZone(): string {
 
   return `${value("year")}-${value("month")}-${value("day")}`;
 }
+
+/**
+ * The instant a calendar day begins in the business zone.
+ *
+ * `payments.created_at` is a `timestamptz`, but "how much did we take in
+ * September" is a question about Kenyan calendar days. Reading the boundary in
+ * UTC shifts the window three hours: money taken at 01:00 Nairobi on the 1st
+ * was received at 22:00 UTC on the previous day, so a UTC-bounded September
+ * both drops the first three hours of the 1st and picks up the last three of
+ * August. Small, and exactly the kind of discrepancy that makes a revenue
+ * figure impossible to reconcile against anything else.
+ *
+ * The offset is derived from the zone rather than written as +03:00. Kenya has
+ * not observed DST since 1960 so the constant would be right today, but it
+ * would silently stop being right the moment `BUSINESS_TIME_ZONE` changed —
+ * and that is one edit away.
+ */
+const zonedParts = new Intl.DateTimeFormat("en-US", {
+  timeZone: BUSINESS_TIME_ZONE,
+  calendar: "gregory",
+  numberingSystem: "latn",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hour12: false,
+});
+
+/** How far the zone's wall clock is ahead of UTC at a given instant. */
+function offsetMsAt(instant: Date): number {
+  const parts = zonedParts.formatToParts(instant);
+  const value = (type: string) => Number(parts.find(p => p.type === type)?.value);
+
+  // Hour 24 is how en-US with hour12:false spells midnight.
+  const hour = value("hour") % 24;
+
+  const wallClockAsUtc = Date.UTC(
+    value("year"),
+    value("month") - 1,
+    value("day"),
+    hour,
+    value("minute"),
+    value("second"),
+  );
+
+  return wallClockAsUtc - instant.getTime();
+}
+
+export function startOfBusinessDay(day: string): Date {
+  const midnightUtc = Date.parse(`${day}T00:00:00Z`);
+
+  // Two passes: the offset is looked up at an instant, and the instant is what
+  // is being solved for. The first guess lands within a day of the answer,
+  // which is close enough for the second to read the correct offset — the
+  // standard way round this, and exact for a zone whose offset is fixed.
+  const guess = new Date(midnightUtc - offsetMsAt(new Date(midnightUtc)));
+
+  return new Date(midnightUtc - offsetMsAt(guess));
+}

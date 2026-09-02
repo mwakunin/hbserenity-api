@@ -602,6 +602,34 @@ Non-default dev ports are deliberate: another project on this machine binds
   snapshots at booking time, so a rate changed in between legitimately yields
   a different total. Don't document it as a held price.
 
+- **`GET /admin/payments` is where money received is totalled.** Payments
+  could only be read one booking at a time, so nothing could answer "how much
+  came in". `totals` is computed over every matching attempt rather than the
+  page — a total of one page is not a total — and counts **`success` only**: a
+  pending or failed attempt is not money, and including one overstates takings
+  by however many prompts went unanswered. `netCents` subtracts refunds
+  recorded against those attempts.
+
+  `from`/`to` are Kenyan calendar days, half-open, resolved by
+  `startOfBusinessDay()` in `lib/dates.ts`. Bounded in UTC a month's takings
+  lose their first three hours and gain the last three of the month before —
+  small, and enough to make the figure irreconcilable with anything else. That
+  helper derives the offset from `BUSINESS_TIME_ZONE` rather than writing
+  +03:00, which is right today and one edit from being wrong.
+
+  Like the guest-facing payment history, it names its columns and **never
+  returns `checkoutRequestId` or `merchantRequestId`**. A test asserts on the
+  whole response body rather than on named fields, so a correlation id added
+  to the table later cannot slip in unnoticed.
+
+  `refundedCents` per row comes from a correlated subquery built with the
+  **query builder**, not written into a `sql` template. Drizzle only qualifies
+  column names it can see are ambiguous, and an outer table referenced from a
+  hand-written template is not one of those: the correlation renders as
+  `where "payment_id" = "id"`, which resolves both sides against `refunds`,
+  matches nothing and reports every payment as unrefunded. It fails silently —
+  no error, just zeroes.
+
 - **Refunds are records, not transfers.** Only a `success` payment can be
   refunded — you cannot return money never taken. Partial refunds are
   allowed, and the total can never exceed the payment.

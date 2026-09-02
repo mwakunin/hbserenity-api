@@ -1,4 +1,4 @@
-import { desc, eq } from "drizzle-orm";
+import { and, asc, count, desc, eq, gte, lt, sql, sum } from "drizzle-orm";
 import * as HttpStatusCodes from "stoker/http-status-codes";
 import * as HttpStatusPhrases from "stoker/http-status-phrases";
 
@@ -6,6 +6,7 @@ import type { AppRouteHandler } from "@/lib/types";
 
 import db from "@/db";
 import { payments, refunds } from "@/db/schema";
+import { startOfBusinessDay } from "@/lib/dates";
 import {
   completePastStays,
   paymentsNeedingAttention,
@@ -16,6 +17,7 @@ import { recordRefund as recordRefundForPayment } from "@/lib/refunds";
 
 import type {
   AttentionRoute,
+  ListPaymentsRoute,
   ListRefundsRoute,
   ReconcileRoute,
   RecordRefundRoute,
@@ -120,4 +122,106 @@ export const listRefunds: AppRouteHandler<ListRefundsRoute> = async (c) => {
 export const attention: AppRouteHandler<AttentionRoute> = async (c) => {
   const data = await paymentsNeedingAttention();
   return c.json({ data }, HttpStatusCodes.OK);
+};
+
+/**
+ * How much of one attempt has been given back.
+ *
+ * A correlated subquery rather than a join: a payment with two refunds must
+ * appear once carrying their sum, and joining would repeat the payment row.
+ *
+ * Built with the query builder rather than written into the `sql` template.
+ * Drizzle only qualifies column names it knows are ambiguous, and a template
+ * referring to an outer table is not something it can see: written by hand,
+ * the correlation renders as `where "payment_id" = "id"`, which resolves both
+ * sides against `refunds` and quietly sums nothing at all. Passing the
+ * builder in makes it `"refunds"."payment_id" = "payments"."id"`.
+ */
+const refundedForPayment = sql<number>`coalesce(${
+  db.select({ total: sum(refunds.amountCents) })
+    .from(refunds)
+    .where(eq(refunds.paymentId, payments.id))
+}, 0)`.mapWith(Number);
+
+export const listPayments: AppRouteHandler<ListPaymentsRoute> = async (c) => {
+  const { status, bookingId, from, to, page, limit } = c.req.valid("query");
+
+  const filters = [];
+
+  if (status)
+    filters.push(eq(payments.status, status));
+  if (bookingId)
+    filters.push(eq(payments.bookingId, bookingId));
+
+  // Kenyan calendar days, half-open. `startOfBusinessDay` resolves the
+  // boundary in the business zone — read in UTC the window sits three hours
+  // out of step with the day it claims to cover.
+  if (from)
+    filters.push(gte(payments.createdAt, startOfBusinessDay(from)));
+  if (to)
+    filters.push(lt(payments.createdAt, startOfBusinessDay(to)));
+
+  const where = filters.length > 0 ? and(...filters) : undefined;
+
+  const [rows, [summary], [{ refunded }]] = await Promise.all([
+    // Columns are named, never selected wholesale: `checkoutRequestId` and
+    // `merchantRequestId` are what an unauthenticated callback uses to
+    // identify an attempt, so they must not leave the server.
+    db.select({
+      id: payments.id,
+      bookingId: payments.bookingId,
+      provider: payments.provider,
+      phoneNumber: payments.phoneNumber,
+      amountCents: payments.amountCents,
+      status: payments.status,
+      mpesaReceiptNumber: payments.mpesaReceiptNumber,
+      resultDesc: payments.resultDesc,
+      refundedCents: refundedForPayment,
+      createdAt: payments.createdAt,
+      updatedAt: payments.updatedAt,
+    })
+      .from(payments)
+      .where(where)
+      .limit(limit)
+      .offset((page - 1) * limit)
+      // `createdAt` is not unique, so offset pagination needs `id` to make the
+      // order total.
+      .orderBy(desc(payments.createdAt), asc(payments.id)),
+
+    // Over every match, not the page. `filter (where status = 'success')`
+    // because a pending or failed attempt is not money — counting one would
+    // report takings for a prompt nobody answered.
+    db.select({
+      total: count(),
+      receivedCents: sql<number>`coalesce(sum(${payments.amountCents})
+        filter (where ${payments.status} = 'success'), 0)`.mapWith(Number),
+    })
+      .from(payments)
+      .where(where),
+
+    // Refunds against the same set. Separate from the query above because
+    // joining refunds to payments there would repeat a payment that has two
+    // of them and double-count its amount in `receivedCents`.
+    db.select({
+      refunded: sql<number>`coalesce(sum(${refunds.amountCents}), 0)`.mapWith(Number),
+    })
+      .from(refunds)
+      .innerJoin(payments, eq(payments.id, refunds.paymentId))
+      .where(where),
+  ]);
+
+  return c.json({
+    data: rows,
+    totals: {
+      receivedCents: summary.receivedCents,
+      refundedCents: refunded,
+      netCents: summary.receivedCents - refunded,
+    },
+    meta: {
+      page,
+      limit,
+      total: summary.total,
+      totalPages: Math.ceil(summary.total / limit),
+    },
+  }, HttpStatusCodes.OK);
 };

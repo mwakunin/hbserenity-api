@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { todayInBusinessZone } from "./dates";
+import { startOfBusinessDay, todayInBusinessZone } from "./dates";
 
 /**
  * Kenya is UTC+3, so for the first three hours of each Kenyan day UTC still
@@ -77,6 +77,50 @@ describe("todayInBusinessZone", () => {
     try {
       expect(new Date().toISOString().slice(0, 10)).toBe("2026-08-31");
       expect(todayInBusinessZone()).toBe("2026-09-01");
+    }
+    finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+/**
+ * A money window bounded in UTC is three hours out of step with the Kenyan
+ * day it claims to cover — it drops the first three hours of the day and
+ * picks up the last three of the day before.
+ */
+describe("startOfBusinessDay", () => {
+  it.each([
+    ["2026-09-01", "2026-08-31T21:00:00.000Z"],
+    ["2026-01-01", "2025-12-31T21:00:00.000Z"],
+    // A leap day, and the day after it.
+    ["2028-02-29", "2028-02-28T21:00:00.000Z"],
+    ["2028-03-01", "2028-02-29T21:00:00.000Z"],
+  ])("puts the start of %s at %s", (day, expected) => {
+    expect(startOfBusinessDay(day).toISOString()).toBe(expected);
+  });
+
+  it("is exactly 24 hours before the next day starts", () => {
+    const day = startOfBusinessDay("2026-09-01").getTime();
+    const next = startOfBusinessDay("2026-09-02").getTime();
+
+    expect(next - day).toBe(24 * 60 * 60 * 1000);
+  });
+
+  // The boundary has to agree with what todayInBusinessZone calls today, or
+  // "money taken today" and "today" mean different days for three hours.
+  it("agrees with todayInBusinessZone at the edges of a Kenyan day", () => {
+    vi.useFakeTimers();
+    try {
+      // 21:00:00Z is the first instant of 2026-09-01 in Nairobi.
+      vi.setSystemTime(new Date("2026-08-31T21:00:00Z"));
+      expect(todayInBusinessZone()).toBe("2026-09-01");
+      expect(startOfBusinessDay(todayInBusinessZone()).getTime())
+        .toBe(new Date("2026-08-31T21:00:00Z").getTime());
+
+      // One millisecond earlier is still the previous Kenyan day.
+      vi.setSystemTime(new Date("2026-08-31T20:59:59.999Z"));
+      expect(todayInBusinessZone()).toBe("2026-08-31");
     }
     finally {
       vi.useRealTimers();
