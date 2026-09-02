@@ -62,12 +62,35 @@ function checkViolationBody(err: unknown) {
 }
 
 export const list: AppRouteHandler<ListRoute> = async (c) => {
-  const { county, town, propertyType, minGuests, maxPriceCents, page, limit }
+  const { county, town, propertyType, minGuests, maxPriceCents, status, page, limit }
     = c.req.valid("query");
 
-  // Only ever expose active listings publicly — drafts and deactivated
-  // properties must not leak through the browse endpoint.
-  const filters = [eq(properties.status, "active")];
+  const isAdmin = c.var.user?.role === "admin";
+
+  /*
+   * "active" is an unconditional floor for anyone who is not an admin.
+   *
+   * Written this way round on purpose: the branch that widens the filter is
+   * the exception, so a mistake in it leaves the public endpoint too strict
+   * rather than leaking a draft. `status` is simply ignored for a non-admin —
+   * refusing it would confirm that other statuses exist, and there is nothing
+   * a guest could legitimately do with the answer.
+   *
+   * The default stays "active" even for an admin, so browsing the site as one
+   * shows the same listings a guest sees. Seeing drafts is opt-in.
+   */
+  const filters = [];
+  let widenedForAdmin = false;
+
+  if (isAdmin && status) {
+    if (status !== "all")
+      filters.push(eq(properties.status, status));
+    // `status=active` asks for exactly the public list, so it is not widened.
+    widenedForAdmin = status !== "active";
+  }
+  else {
+    filters.push(eq(properties.status, "active"));
+  }
 
   if (county)
     filters.push(eq(properties.county, county));
@@ -80,15 +103,59 @@ export const list: AppRouteHandler<ListRoute> = async (c) => {
   if (maxPriceCents !== undefined)
     filters.push(lte(properties.pricePerNightCents, maxPriceCents));
 
-  const where = and(...filters);
+  const where = filters.length > 0 ? and(...filters) : undefined;
 
   const [rows, [{ total }]] = await Promise.all([
-    db.select().from(properties).where(where).limit(limit).offset((page - 1) * limit).orderBy(properties.createdAt),
+    /*
+     * The cover is chosen by the database, and only the cover is read.
+     *
+     * `property_images_one_cover_idx` guarantees at most one cover per
+     * property but not that there is one — a host can upload photos and never
+     * pick. Ordering cover-first and falling back to the lowest `order` means
+     * a listing with pictures always shows one rather than looking photoless
+     * because nobody pressed a button; `id` only breaks a tie on `order`, so
+     * the same photo comes back on every request instead of flapping.
+     *
+     * `limit: 1` is what keeps this response bounded. Drizzle builds the
+     * relation as a lateral subquery — one row per listing, no fan-out to
+     * collapse — and the limit applies inside it, per listing. Reading whole
+     * galleries and picking in JS instead would make transfer, memory and
+     * sorting work grow with how many photos a host happened to upload, to
+     * return exactly one of them.
+     */
+    db.query.properties.findMany({
+      where,
+      with: {
+        images: {
+          limit: 1,
+          orderBy: (image, { asc, desc }) => [
+            desc(image.isCover),
+            asc(image.order),
+            asc(image.id),
+          ],
+        },
+      },
+      limit,
+      offset: (page - 1) * limit,
+      orderBy: properties.createdAt,
+    }),
     db.select({ total: count() }).from(properties).where(where),
   ]);
 
+  // Same URL, different answer depending on who asked: `?status=all` returns
+  // drafts to an admin and only active listings to everyone else. A shared
+  // cache keyed on the URL would store the admin's copy and replay it to
+  // anonymous visitors, so the widened response must not be stored. Sessions
+  // are cookie-based, which means the Authorization-header exemption that
+  // normally keeps shared caches off authenticated responses does not apply.
+  if (widenedForAdmin)
+    c.header("Cache-Control", "no-store");
+
   return c.json({
-    data: rows,
+    data: rows.map(({ images, ...property }) => ({
+      ...property,
+      coverImage: images[0] ?? null,
+    })),
     meta: {
       page,
       limit,

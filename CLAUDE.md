@@ -311,6 +311,45 @@ Non-default dev ports are deliberate: another project on this machine binds
   `sentEmails` rather than calling Resend, so senders must still run or the
   tests assert nothing.
 
+- **The browse list carries a cover photo, and only a cover.**
+  `GET /properties` returns `coverImage` per listing so a grid needs no request
+  per card; the full gallery stays on `GET /properties/{id}`. A host can upload any
+  number of photos, and the size of a list response must not depend on that.
+  The cover is picked **in the database**, not in JS: the `images` relation is
+  read with `limit: 1` ordered cover-first, then lowest `order`, then `id`.
+  Drizzle builds the relation as a lateral subquery, so that limit applies per
+  listing — a gallery of any size still transfers one row, and the response
+  size cannot grow with how many photos a host uploaded. Reading whole
+  galleries to keep one of each is the regression to watch for. The `order`
+  fallback means a listing with pictures never looks photoless because the
+  cover button was never pressed; `id` only breaks a tie, so the chosen photo
+  does not flap between requests.
+
+  A lateral subquery is not a join in the fan-out sense — a listing is still
+  one row in the page. A real join would repeat the listing per photo.
+
+- **`status` on the browse list is admin-only, and "active" is an
+  unconditional floor.** The branch that widens the filter is the exception, so
+  a mistake there leaves the endpoint too strict rather than leaking a draft.
+  For a non-admin the parameter is **ignored** rather than refused: rejecting
+  it would confirm that other statuses exist, and there is nothing a guest
+  could do with the answer.
+
+  The default stays `active` even for an admin, so browsing the site as one
+  shows what a guest sees. Seeing drafts is opt-in — `?status=all`, or a
+  specific status. This matters because `properties.status` defaults to
+  `draft`: without it, a listing you create appears in no list at all and its
+  id is the only way back.
+
+  Any response whose content depends on **who asked** is sent
+  `Cache-Control: no-store` — the widened list, and a draft on
+  `GET /properties/{id}`. The URL is identical for both callers, so a shared
+  cache keyed on it would store the admin's copy and replay it to anonymous
+  visitors. Sessions are cookies, not an `Authorization` header, so the rule
+  that normally keeps shared caches off authenticated responses does not
+  apply. An admin asking for `?status=active` is deliberately still
+  cacheable: it is the public list.
+
 - **Photos are uploaded by the client, straight to ImageKit.** The API only
   signs the request (`POST /properties/{id}/images/upload-auth`, admin-only,
   five-minute expiry) and records the result. Proxying the bytes would put
@@ -728,6 +767,7 @@ Deliberately deferred — don't assume these exist:
   part-paid, "is this booking paid?" stops being a single comparison, and
   reconciliation, the attention list, refunds and the cancellation email each
   need their own answer to it.
+
 - **A booking idempotency key**, so a double-tapped "Book now" can create two
   bookings for different dates. The same dates are already impossible — the
   overlap constraint sees to that.
