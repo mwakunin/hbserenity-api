@@ -385,6 +385,41 @@ Non-default dev ports are deliberate: another project on this machine binds
   check-then-update cannot prevent it — both requests read "no other cover".
   The handlers clear then set for the ordinary case and map `23505` to 409.
 
+- **Amenities are a shared vocabulary, and a listing's set is replaced rather
+  than edited.** `GET /amenities` is the catalogue every listing picks from —
+  public, because it populates a picker and tells a guest nothing they cannot
+  already see. `POST /amenities` is admin-only, and `amenities.name` is UNIQUE
+  so two entries meaning the same thing cannot both be pickable. The name is
+  trimmed before it reaches that constraint, or a trailing space produces
+  exactly the duplicate the constraint exists to stop.
+
+  `PUT /properties/{id}/amenities` takes the **complete set** the listing ends
+  up with, not a change to apply. That makes a re-submitted form idempotent
+  and lets unticking a box be expressed by leaving it out — a
+  POST-one-at-a-time API would need a second call to remove anything. Repeated
+  ids are deduplicated rather than refused, since a checkbox list can submit
+  the same box twice and means the same thing either way.
+
+  Replacement is delete-then-insert, which is two statements, so it takes the
+  property `FOR UPDATE` lock — the same one bookings and blackouts take. Under
+  READ COMMITTED two concurrent replacements each delete only what their own
+  statement can see and then both insert, leaving the **union** of the two
+  sets, which is neither of the things that were asked for.
+
+  Testing that lock needs the **empty** set specifically. A replacement that
+  inserts blocks on a held `FOR UPDATE` anyway, because the foreign key to
+  `properties` takes a KEY SHARE lock that conflicts with it — so such a test
+  passes with the handler's own lock removed. An empty set only deletes and
+  touches no foreign key, so it blocks only if the handler took the lock
+  itself. Same distinction the rate-override delete test draws.
+
+  An id that is not in the catalogue is a 422 **naming it**, from a check
+  inside the transaction; the foreign key is still the backstop, since the
+  check is two statements away from the insert. Migration 0015 seeds the
+  catalogue, `ON CONFLICT DO NOTHING` so it is a no-op against a database that
+  already has those names. There is deliberately no delete: removing an
+  amenity would silently strip it from every listing that had it.
+
 - **A paid booking can be cancelled, and cancelling never moves money.**
   Plans change on both sides, so `confirmed → cancelled` is allowed for the
   guest who booked and for an admin. The nights go back on sale immediately —
