@@ -341,6 +341,15 @@ Non-default dev ports are deliberate: another project on this machine binds
   `draft`: without it, a listing you create appears in no list at all and its
   id is the only way back.
 
+  Any response whose content depends on **who asked** is sent
+  `Cache-Control: no-store` — the widened list, and a draft on
+  `GET /properties/{id}`. The URL is identical for both callers, so a shared
+  cache keyed on it would store the admin's copy and replay it to anonymous
+  visitors. Sessions are cookies, not an `Authorization` header, so the rule
+  that normally keeps shared caches off authenticated responses does not
+  apply. An admin asking for `?status=active` is deliberately still
+  cacheable: it is the public list.
+
 - **Photos are uploaded by the client, straight to ImageKit.** The API only
   signs the request (`POST /properties/{id}/images/upload-auth`, admin-only,
   five-minute expiry) and records the result. Proxying the bytes would put

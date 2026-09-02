@@ -80,10 +80,13 @@ export const list: AppRouteHandler<ListRoute> = async (c) => {
    * shows the same listings a guest sees. Seeing drafts is opt-in.
    */
   const filters = [];
+  let widenedForAdmin = false;
 
   if (isAdmin && status) {
     if (status !== "all")
       filters.push(eq(properties.status, status));
+    // `status=active` asks for exactly the public list, so it is not widened.
+    widenedForAdmin = status !== "active";
   }
   else {
     filters.push(eq(properties.status, "active"));
@@ -138,6 +141,15 @@ export const list: AppRouteHandler<ListRoute> = async (c) => {
     }),
     db.select({ total: count() }).from(properties).where(where),
   ]);
+
+  // Same URL, different answer depending on who asked: `?status=all` returns
+  // drafts to an admin and only active listings to everyone else. A shared
+  // cache keyed on the URL would store the admin's copy and replay it to
+  // anonymous visitors, so the widened response must not be stored. Sessions
+  // are cookie-based, which means the Authorization-header exemption that
+  // normally keeps shared caches off authenticated responses does not apply.
+  if (widenedForAdmin)
+    c.header("Cache-Control", "no-store");
 
   return c.json({
     data: rows.map(({ images, ...property }) => ({

@@ -298,6 +298,50 @@ describe("properties routes", () => {
       },
     );
 
+    // Same URL, two different answers. A shared cache keyed on the URL would
+    // store the admin's copy and replay it to anonymous visitors — and the
+    // session is a cookie, so the Authorization-header rule that normally
+    // keeps shared caches off authenticated responses does not apply here.
+    describe("cacheability of the admin view", () => {
+      it.each(["all", "draft", "inactive"])(
+        "marks status=%s no-store, since it cannot be shared with a guest",
+        async (status) => {
+          const admin = await signIn(nextPhone(), "admin");
+          await makeProperty(admin.id, { title: "Active one", status: "active" });
+          await makeProperty(admin.id, { title: "Draft one", status: "draft" });
+
+          const url = `/properties?status=${status}`;
+
+          const asAdmin = await app.request(url, { headers: admin.headers });
+          const asGuest = await app.request(url);
+
+          // The two answers differ, which is what makes sharing them a leak.
+          const adminTitles = (await asAdmin.json()).data.map((p: { title: string }) => p.title);
+          const guestTitles = (await asGuest.json()).data.map((p: { title: string }) => p.title);
+          expect(adminTitles).not.toEqual(guestTitles);
+          expect(guestTitles).toEqual(["Active one"]);
+
+          expect(asAdmin.headers.get("cache-control")).toBe("no-store");
+        },
+      );
+
+      // Precision matters both ways: marking every list response no-store
+      // would make the public browse grid uncacheable for no reason.
+      it.each([
+        ["the default", ""],
+        ["an explicit status=active", "?status=active"],
+      ])("does not set no-store on %s", async (_label, query) => {
+        const admin = await signIn(nextPhone(), "admin");
+        await makeProperty(admin.id, { status: "active" });
+
+        const asAdmin = await app.request(`/properties${query}`, { headers: admin.headers });
+        const asGuest = await app.request(`/properties${query}`);
+
+        expect(asAdmin.headers.get("cache-control")).toBeNull();
+        expect(asGuest.headers.get("cache-control")).toBeNull();
+      });
+    });
+
     // Without this the browse grid has no photos: the only way to get one was
     // a request per listing.
     describe("cover image", () => {
