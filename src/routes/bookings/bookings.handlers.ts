@@ -5,7 +5,7 @@ import * as HttpStatusPhrases from "stoker/http-status-phrases";
 import type { AppRouteHandler } from "@/lib/types";
 
 import db from "@/db";
-import { bookings, properties, propertyBlackouts, propertyRateOverrides } from "@/db/schema";
+import { bookings, properties, propertyBlackouts, propertyRateOverrides, user } from "@/db/schema";
 import { todayInBusinessZone } from "@/lib/dates";
 import { isExclusionViolation } from "@/lib/db-errors";
 import { notifyBookingCancelled } from "@/lib/notifications";
@@ -79,7 +79,7 @@ export const availability: AppRouteHandler<AvailabilityRoute> = async (c) => {
 
 export const create: AppRouteHandler<CreateRoute> = async (c) => {
   const { propertyId, checkIn, checkOut, guestCount } = c.req.valid("json");
-  const user = c.var.user!;
+  const caller = c.var.user!;
 
   try {
     const result = await db.transaction(async (tx) => {
@@ -148,7 +148,7 @@ export const create: AppRouteHandler<CreateRoute> = async (c) => {
 
       const [booking] = await tx.insert(bookings).values({
         propertyId,
-        guestId: user.id,
+        guestId: caller.id,
         checkIn,
         checkOut,
         guestCount,
@@ -202,20 +202,57 @@ export const create: AppRouteHandler<CreateRoute> = async (c) => {
 
 export const list: AppRouteHandler<ListRoute> = async (c) => {
   const { status, page, limit } = c.req.valid("query");
-  const user = c.var.user!;
+  const caller = c.var.user!;
 
   const filters = [];
 
   // A guest may only ever see their own bookings.
-  if (user.role !== "admin")
-    filters.push(eq(bookings.guestId, user.id));
+  if (caller.role !== "admin")
+    filters.push(eq(bookings.guestId, caller.id));
   if (status)
     filters.push(eq(bookings.status, status));
 
   const where = filters.length > 0 ? and(...filters) : undefined;
 
   const [rows, [{ total }]] = await Promise.all([
-    db.select().from(bookings).where(where).limit(limit).offset((page - 1) * limit).orderBy(bookings.createdAt),
+    /*
+     * Columns are listed rather than spread, and the join takes the guest's
+     * display name only. `guestId` on its own cannot be rendered: a host's
+     * dashboard would need a request per row to print who booked, and a
+     * guest's own trips list would show a uuid.
+     *
+     * Naming the columns also means a column added to `bookings` later has to
+     * be added here deliberately, rather than appearing in the response the
+     * day it lands — the same reason the payment history avoids a bare
+     * select. `user` carries an email and a phone number that nothing on this
+     * endpoint needs.
+     */
+    db.select({
+      id: bookings.id,
+      propertyId: bookings.propertyId,
+      guestId: bookings.guestId,
+      guestName: user.name,
+      checkIn: bookings.checkIn,
+      checkOut: bookings.checkOut,
+      guestCount: bookings.guestCount,
+      status: bookings.status,
+      totalAmountCents: bookings.totalAmountCents,
+      currency: bookings.currency,
+      cancelledAt: bookings.cancelledAt,
+      cancellationReason: bookings.cancellationReason,
+      cancelledBy: bookings.cancelledBy,
+      createdAt: bookings.createdAt,
+      updatedAt: bookings.updatedAt,
+    })
+      .from(bookings)
+      // Inner: `bookings.guestId` is NOT NULL and references `user`, so a
+      // booking without one cannot exist. A left join would quietly turn a
+      // broken row into a booking with a null name instead of failing loudly.
+      .innerJoin(user, eq(user.id, bookings.guestId))
+      .where(where)
+      .limit(limit)
+      .offset((page - 1) * limit)
+      .orderBy(bookings.createdAt),
     db.select({ total: count() }).from(bookings).where(where),
   ]);
 
@@ -227,13 +264,13 @@ export const list: AppRouteHandler<ListRoute> = async (c) => {
 
 export const getOne: AppRouteHandler<GetOneRoute> = async (c) => {
   const { id } = c.req.valid("param");
-  const user = c.var.user!;
+  const caller = c.var.user!;
 
   const [booking] = await db.select().from(bookings).where(eq(bookings.id, id));
 
   // 404 rather than 403 for someone else's booking — don't confirm that an id
   // exists to a caller who has no business knowing.
-  if (!booking || (user.role !== "admin" && booking.guestId !== user.id)) {
+  if (!booking || (caller.role !== "admin" && booking.guestId !== caller.id)) {
     return c.json(
       { message: HttpStatusPhrases.NOT_FOUND },
       HttpStatusCodes.NOT_FOUND,
@@ -248,11 +285,11 @@ export const cancel: AppRouteHandler<CancelRoute> = async (c) => {
   // The body is optional: cancelling an unpaid hold needs no explanation, so
   // a bare POST is valid and arrives here as undefined.
   const { reason } = c.req.valid("json") ?? {};
-  const user = c.var.user!;
+  const caller = c.var.user!;
 
   const [booking] = await db.select().from(bookings).where(eq(bookings.id, id));
 
-  if (!booking || (user.role !== "admin" && booking.guestId !== user.id)) {
+  if (!booking || (caller.role !== "admin" && booking.guestId !== caller.id)) {
     return c.json(
       { message: HttpStatusPhrases.NOT_FOUND },
       HttpStatusCodes.NOT_FOUND,
@@ -306,7 +343,7 @@ export const cancel: AppRouteHandler<CancelRoute> = async (c) => {
       status: "cancelled",
       cancelledAt: new Date(),
       cancellationReason: reason ?? null,
-      cancelledBy: user.id,
+      cancelledBy: caller.id,
     })
     .where(and(eq(bookings.id, id), eq(bookings.status, booking.status)))
     .returning();

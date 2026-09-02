@@ -6,7 +6,7 @@ import type { TestUser } from "@/test/helpers";
 import app from "@/app";
 import db from "@/db";
 import { bookings, properties } from "@/db/schema";
-import { dayFromNow, makeProperty, nextPhone, resetDb, signIn } from "@/test/helpers";
+import { dayFromNow, makeProperty, nextEmail, nextPhone, resetDb, signIn, signUpWithEmail } from "@/test/helpers";
 
 async function book(
   user: TestUser,
@@ -645,6 +645,53 @@ describe("bookings routes", () => {
 
       const res = await app.request("/bookings", { headers: admin.headers });
       expect((await res.json()).data).toHaveLength(2);
+    });
+
+    // Without this a dashboard can only print a uuid, or fetch a user per
+    // row to turn it into a name. `GET /properties/{id}/reviews` already
+    // joins for exactly this reason.
+    it("carries the guest's name", async () => {
+      const named = await signUpWithEmail(
+        nextEmail(),
+        "correct-horse-battery",
+        "Amina Wanjiru",
+      );
+      await book(named, propertyId, dayFromNow(10), dayFromNow(15));
+
+      const res = await app.request("/bookings", { headers: admin.headers });
+      const { data } = await res.json();
+
+      expect(data[0].guestName).toBe("Amina Wanjiru");
+    });
+
+    it("carries it on a guest's own list too", async () => {
+      const named = await signUpWithEmail(
+        nextEmail(),
+        "correct-horse-battery",
+        "Otieno Odhiambo",
+      );
+      await book(named, propertyId, dayFromNow(10), dayFromNow(15));
+
+      const res = await app.request("/bookings", { headers: named.headers });
+      const { data } = await res.json();
+
+      expect(data[0].guestName).toBe("Otieno Odhiambo");
+    });
+
+    // The display name is all this endpoint needs. An email and a phone
+    // number sit on the same row and must not ride along with it.
+    it("carries the name only, not the guest's contact details", async () => {
+      const email = nextEmail();
+      const named = await signUpWithEmail(email, "correct-horse-battery", "Amina Wanjiru");
+      await book(named, propertyId, dayFromNow(10), dayFromNow(15));
+
+      const res = await app.request("/bookings", { headers: admin.headers });
+      const body = await res.text();
+
+      expect(body).toContain("Amina Wanjiru");
+      expect(body).not.toContain(email);
+      expect(JSON.parse(body).data[0]).not.toHaveProperty("email");
+      expect(JSON.parse(body).data[0]).not.toHaveProperty("phoneNumber");
     });
 
     it("filters by status", async () => {

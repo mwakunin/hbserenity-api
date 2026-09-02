@@ -385,6 +385,24 @@ Non-default dev ports are deliberate: another project on this machine binds
   check-then-update cannot prevent it — both requests read "no other cover".
   The handlers clear then set for the ordinary case and map `23505` to 409.
 
+- **`GET /bookings` carries `guestName`, and nothing else about the guest.**
+  A `guestId` on its own cannot be rendered: a host's dashboard would need a
+  request per row to print who booked, and a guest's own trips list would show
+  a uuid. The join mirrors `GET /properties/{id}/reviews`, which has always
+  done this.
+
+  Columns are **listed rather than spread** on both sides of that join. `user`
+  carries an email and a phone number this endpoint has no use for, and naming
+  the booking columns means one added to the table later has to be added here
+  deliberately rather than appearing in the response the day it lands — the
+  same reason the payment history avoids a bare select. The join is inner:
+  `bookings.guestId` is NOT NULL and references `user`, so a left join would
+  quietly turn an impossible row into a booking with a null name.
+
+  Note that `user` is imported as a table in `bookings.handlers.ts`, so the
+  signed-in caller is `caller`, never `user`. A local named `user` shadows the
+  table, and the resulting bug typechecks in some positions.
+
 - **Blocking dates is not a one-way door.** `GET /blackouts` lists them and
   `DELETE /blackouts/{id}` puts the nights back on sale. Both are admin-only:
   `GET /properties/{id}/availability` already tells a guest which dates are

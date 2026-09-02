@@ -1,11 +1,30 @@
 import { z } from "@hono/zod-openapi";
 import { createSelectSchema } from "drizzle-zod";
+import { z as z4 } from "zod/v4";
 
 import { bookings, propertyBlackouts } from "@/db/schema";
 import { MAX_STAY_NIGHTS, nightsBetween } from "@/lib/pricing";
 import { toZodV4SchemaTyped } from "@/lib/zod-utils";
 
-export const selectBookingSchema = toZodV4SchemaTyped(createSelectSchema(bookings));
+// Kept unwrapped so the list item can `.extend()` it — toZodV4SchemaTyped
+// casts away the object shape that composition needs.
+const rawSelectBooking = createSelectSchema(bookings);
+
+export const selectBookingSchema = toZodV4SchemaTyped(rawSelectBooking);
+
+/**
+ * A booking as it appears in a list, plus who made it.
+ *
+ * `guestId` alone cannot be rendered: a dashboard would have to fetch a user
+ * per row to print a name, and the guest's own trips list would show a uuid.
+ * The display name only — never their email or phone, which the caller has no
+ * need for here and which would then have to be redacted from a shared cache.
+ */
+export const bookingListItemSchema = toZodV4SchemaTyped(
+  rawSelectBooking.extend({
+    guestName: z4.string(),
+  }),
+);
 
 export const selectBlackoutSchema = toZodV4SchemaTyped(
   createSelectSchema(propertyBlackouts),
@@ -75,7 +94,7 @@ export const listBookingsQuerySchema = z.object({
 });
 
 export const listBookingsResponseSchema = z.object({
-  data: z.array(selectBookingSchema),
+  data: z.array(bookingListItemSchema),
   meta: z.object({
     page: z.number().int(),
     limit: z.number().int(),
