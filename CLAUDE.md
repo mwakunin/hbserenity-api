@@ -227,6 +227,32 @@ Non-default dev ports are deliberate: another project on this machine binds
   already-settled booking is flagged on the payment for refund review. Keep
   that flag; it is the only trace of a genuine duplicate charge.
 
+- **Whether a stay has been reviewed is readable without writing one.**
+  `GET /bookings/{id}` carries `review` (the guest's own words, or null) and
+  `GET /bookings` carries `hasReview`. `reviews_booking_idx` is unique, so a
+  second review is a 409 — a fine answer to a race and a useless one to a
+  question, since a page could only discover whether to offer the form by
+  submitting a review and reading the refusal.
+
+  Both come from a **left join**, which cannot fan out because one review per
+  booking is a uniqueness guarantee. Drizzle maps an unmatched left join to
+  `null` for a nested selection rather than to an object of nulls, so an
+  unreviewed stay needs no unpicking. Deliberately not a `canReview` flag: the
+  caller already has the status, and the rule would then live in two places.
+
+- **The browse list takes `?sort`, from a fixed vocabulary.** `newest` (the
+  default), `price_asc`, `price_desc` — never a column name and a direction,
+  which is both an injection surface and a promise to keep ordering by
+  whatever anyone once passed. Every ordering ends on `id`, because neither
+  `createdAt` nor a price is unique and offset pagination needs a total order.
+  They are functions returning fresh arrays: drizzle's `orderBy` takes a
+  mutable array and rejects a shared `as const` tuple outright.
+
+  Price sorts on the **base rate**, not on what a given stay would cost. A
+  seasonal override or a weekend rate can make a cheaper listing dearer for
+  particular dates, and ordering by a total nobody asked for is a different
+  feature.
+
 - **A review belongs to a booking, not a property.** That is what makes it
   trustworthy: only the guest on the booking may write one, only once the stay
   is `completed`, and only once ever. `reviews_booking_idx` is unique, which

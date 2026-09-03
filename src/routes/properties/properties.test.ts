@@ -551,6 +551,74 @@ describe("properties routes", () => {
       });
     });
 
+    const titles = async (query: string) =>
+      (await (await app.request(`/properties${query}`)).json())
+        .data
+        .map((p: { title: string }) => p.title);
+
+    /*
+     * Fixture prices: Diani 850,000c · Nyali 300,000c · Karen 500,000c,
+     * inserted in that order.
+     */
+    describe("sorting", () => {
+      // Newest first, not oldest — a browse grid leads with what was just
+      // listed. This is a change: the endpoint used to return them in the
+      // order they were created, and nothing pinned it.
+      it("defaults to newest first", async () => {
+        expect(await titles("")).toEqual(["Karen cottage", "Nyali flat", "Diani villa"]);
+      });
+
+      it("orders by price ascending", async () => {
+        expect(await titles("?sort=price_asc"))
+          .toEqual(["Nyali flat", "Karen cottage", "Diani villa"]);
+      });
+
+      it("orders by price descending", async () => {
+        expect(await titles("?sort=price_desc"))
+          .toEqual(["Diani villa", "Karen cottage", "Nyali flat"]);
+      });
+
+      it("sorts the filtered set, not the whole catalogue", async () => {
+        expect(await titles("?minGuests=4&sort=price_asc"))
+          .toEqual(["Karen cottage", "Diani villa"]);
+      });
+
+      // A free-form column name would be an injection surface and a promise
+      // to keep ordering by whatever anyone once passed.
+      it("422s an ordering it does not offer", async () => {
+        const res = await app.request("/properties?sort=price_per_night_cents");
+        expect(res.status).toBe(422);
+      });
+
+      /*
+       * Price is not unique, so paging a tied set needs the id tiebreaker or
+       * a listing can appear on two pages and another on none. The ids are
+       * fixed so the lowest is inserted last: without the tiebreaker the
+       * pages come back in insertion order, which is the reverse.
+       */
+      it("pages tied prices in a stable order", async () => {
+        const admin = await signIn(nextPhone(), "admin");
+        const ids = [
+          "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+          "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+          "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        ];
+        for (const id of ids)
+          await makeProperty(admin.id, { id, title: `Tied ${id[0]}`, pricePerNightCents: 100_000 });
+
+        const paged: string[] = [];
+        for (let page = 1; page <= 3; page++) {
+          const { data } = await (await app.request(
+            `/properties?sort=price_asc&maxPriceCents=100000&page=${page}&limit=1`,
+          )).json();
+          paged.push(...data.map((p: { id: string }) => p.id));
+        }
+
+        expect(paged).toEqual([...ids].sort());
+        expect(new Set(paged).size).toBe(3);
+      });
+    });
+
     it("filters by county", async () => {
       const res = await app.request("/properties?county=Kwale");
       const { data } = await res.json();

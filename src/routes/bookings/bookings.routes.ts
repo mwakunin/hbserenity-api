@@ -10,6 +10,7 @@ import { rateLimits } from "@/middlewares/rate-limit";
 import {
   availabilityQuerySchema,
   availabilityResponseSchema,
+  bookingDetailSchema,
   cancelBookingSchema,
   createBlackoutSchema,
   createBookingSchema,
@@ -106,7 +107,13 @@ export const getOne = createRoute({
   path: "/bookings/{id}",
   method: "get",
   tags,
-  summary: "Get one booking",
+  summary: "Get one booking, with its review if it has one",
+  description:
+    "Carries `review` — the guest's own words about the stay — or null. "
+    + "`reviews_booking_idx` is unique, so a second review is a 409, which is "
+    + "a fine answer to a race and a poor one to a question: without this a "
+    + "page could only find out whether to offer the form by submitting one. "
+    + "`GET /bookings` carries `hasReview` for the same reason.",
   middleware: [requireAuth, rateLimits.read()],
   request: {
     params: IdUUIDParamsSchema,
@@ -116,7 +123,7 @@ export const getOne = createRoute({
       tooManyRequestsSchema,
       "Rate limit exceeded",
     ),
-    [HttpStatusCodes.OK]: jsonContent(selectBookingSchema, "The booking"),
+    [HttpStatusCodes.OK]: jsonContent(bookingDetailSchema, "The booking"),
     [HttpStatusCodes.UNAUTHORIZED]: jsonContent(unauthorizedSchema, "Not signed in"),
     [HttpStatusCodes.NOT_FOUND]: jsonContent(notFoundSchema, "Booking not found"),
     [HttpStatusCodes.UNPROCESSABLE_ENTITY]: jsonContent(

@@ -23,6 +23,39 @@ export const selectBookingSchema = toZodV4SchemaTyped(rawSelectBooking);
 export const bookingListItemSchema = toZodV4SchemaTyped(
   rawSelectBooking.extend({
     guestName: z4.string(),
+    /**
+     * Whether this stay has already been reviewed.
+     *
+     * `reviews_booking_idx` is unique, so a second review is a 409 — which is
+     * a fine answer to a race and a poor one to a question. Without this a
+     * trips list cannot decide whether to offer "write a review", and the
+     * only way to find out was to submit one and read the refusal.
+     *
+     * A boolean rather than the review itself: a list needs to know whether
+     * the prompt belongs on the row, and the review is on the booking.
+     */
+    hasReview: z4.boolean(),
+  }),
+);
+
+/** What a guest wrote about a stay. Their own review, on their own booking. */
+const reviewOnBookingSchema = z4.object({
+  id: z4.string(),
+  rating: z4.number().int(),
+  comment: z4.string().nullable(),
+  createdAt: z4.date(),
+});
+
+/**
+ * One booking, plus the review it carries if there is one.
+ *
+ * The review itself here rather than a flag, because this is the page that
+ * shows it back: a guest who has reviewed should see what they said, not just
+ * be refused the form.
+ */
+export const bookingDetailSchema = toZodV4SchemaTyped(
+  rawSelectBooking.extend({
+    review: reviewOnBookingSchema.nullable(),
   }),
 );
 
