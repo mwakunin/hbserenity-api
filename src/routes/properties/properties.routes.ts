@@ -43,7 +43,11 @@ export const list = createRoute({
     + "the whole stay — bookings that hold dates and host blackouts both count "
     + "as taken. Ranges are half-open, so a listing is free on the day a "
     + "previous stay checks out. One date without the other is a 422 rather "
-    + "than a silently ignored filter.",
+    + "than a silently ignored filter.\n\n"
+    + "`sort` takes `newest` (the default), `price_asc` or `price_desc`. The "
+    + "price orderings use the base nightly rate, not what a particular stay "
+    + "would cost — a seasonal override or a weekend rate can make a cheaper "
+    + "listing dearer for given dates.",
   middleware: [rateLimits.read()],
   request: {
     query: listPropertiesQuerySchema,

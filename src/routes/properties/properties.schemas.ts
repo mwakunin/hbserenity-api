@@ -116,6 +116,24 @@ export const listPropertiesQuerySchema = z.object({
    */
   checkIn: z.iso.date().optional().openapi({ example: "2026-09-10" }),
   checkOut: z.iso.date().optional().openapi({ example: "2026-09-14" }),
+  /**
+   * How to order the page.
+   *
+   * A fixed vocabulary rather than a column name and a direction: a free-form
+   * sort parameter is a column the caller chooses, which is both an injection
+   * surface and a promise to keep ordering by whatever anyone once passed.
+   *
+   * `newest` is the default and the only one that is not about price, which
+   * is what a guest scanning a small catalogue wants. The price orderings are
+   * on the base rate, not on what a given stay would cost: a seasonal
+   * override or a weekend rate can make a cheaper listing dearer for
+   * particular dates, and sorting by a total nobody asked for would be a
+   * different feature.
+   */
+  sort: z
+    .enum(["newest", "price_asc", "price_desc"])
+    .default("newest")
+    .openapi({ example: "price_asc" }),
   page: z.coerce.number().int().positive().default(1),
   limit: z.coerce.number().int().positive().max(100).default(20),
 }).refine(

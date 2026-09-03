@@ -1,11 +1,11 @@
-import { and, asc, count, eq, gt, inArray, lt } from "drizzle-orm";
+import { and, asc, count, eq, gt, inArray, lt, sql } from "drizzle-orm";
 import * as HttpStatusCodes from "stoker/http-status-codes";
 import * as HttpStatusPhrases from "stoker/http-status-phrases";
 
 import type { AppRouteHandler } from "@/lib/types";
 
 import db from "@/db";
-import { bookings, properties, propertyBlackouts, propertyRateOverrides, user } from "@/db/schema";
+import { bookings, properties, propertyBlackouts, propertyRateOverrides, reviews, user } from "@/db/schema";
 import { HOLDING_STATUSES, overlapsWindow } from "@/lib/availability";
 import { todayInBusinessZone } from "@/lib/dates";
 import { isExclusionViolation } from "@/lib/db-errors";
@@ -241,10 +241,21 @@ export const list: AppRouteHandler<ListRoute> = async (c) => {
       cancelledAt: bookings.cancelledAt,
       cancellationReason: bookings.cancellationReason,
       cancelledBy: bookings.cancelledBy,
+      /*
+       * Whether the stay has been reviewed, so a trips list can decide
+       * whether to offer the form. `reviews_booking_idx` is unique, so
+       * submitting and reading the 409 was the only way to find out — a fine
+       * answer to a race, a poor one to a question.
+       *
+       * A left join, not a subquery: one review per booking is a uniqueness
+       * guarantee, so this cannot fan out and repeat a booking.
+       */
+      hasReview: sql<boolean>`${reviews.id} IS NOT NULL`,
       createdAt: bookings.createdAt,
       updatedAt: bookings.updatedAt,
     })
       .from(bookings)
+      .leftJoin(reviews, eq(reviews.bookingId, bookings.id))
       // Inner: `bookings.guestId` is NOT NULL and references `user`, so a
       // booking without one cannot exist. A left join would quietly turn a
       // broken row into a booking with a null name instead of failing loudly.
@@ -268,18 +279,34 @@ export const getOne: AppRouteHandler<GetOneRoute> = async (c) => {
   const { id } = c.req.valid("param");
   const caller = c.var.user!;
 
-  const [booking] = await db.select().from(bookings).where(eq(bookings.id, id));
+  // One statement, so the booking and its review cannot be read from two
+  // different moments — a review committed between them would show a stay as
+  // both completed and unreviewed, which is exactly the state the page acts on.
+  const [row] = await db.select({
+    booking: bookings,
+    review: {
+      id: reviews.id,
+      rating: reviews.rating,
+      comment: reviews.comment,
+      createdAt: reviews.createdAt,
+    },
+  })
+    .from(bookings)
+    .leftJoin(reviews, eq(reviews.bookingId, bookings.id))
+    .where(eq(bookings.id, id));
 
   // 404 rather than 403 for someone else's booking — don't confirm that an id
   // exists to a caller who has no business knowing.
-  if (!booking || (caller.role !== "admin" && booking.guestId !== caller.id)) {
+  if (!row || (caller.role !== "admin" && row.booking.guestId !== caller.id)) {
     return c.json(
       { message: HttpStatusPhrases.NOT_FOUND },
       HttpStatusCodes.NOT_FOUND,
     );
   }
 
-  return c.json(booking, HttpStatusCodes.OK);
+  // Drizzle maps an unmatched left join to null for a nested selection rather
+  // than to an object of nulls, so an unreviewed stay needs no unpicking here.
+  return c.json({ ...row.booking, review: row.review }, HttpStatusCodes.OK);
 };
 
 export const cancel: AppRouteHandler<CancelRoute> = async (c) => {

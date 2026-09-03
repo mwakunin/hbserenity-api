@@ -139,6 +139,77 @@ describe("reviews", () => {
     });
   });
 
+  /*
+   * Whether a stay has been reviewed is a question, and `reviews_booking_idx`
+   * answering it with a 409 to a submitted review is not an answer a UI can
+   * use — it cannot decide whether to offer the form without writing one.
+   */
+  describe("whether a stay has been reviewed", () => {
+    const detail = (user: TestUser, id = bookingId) =>
+      app.request(`/bookings/${id}`, { headers: user.headers });
+
+    const list = (user: TestUser) =>
+      app.request("/bookings", { headers: user.headers });
+
+    it("reports no review before one is written", async () => {
+      expect((await (await detail(guest)).json()).review).toBeNull();
+      expect((await (await list(guest)).json()).data[0].hasReview).toBe(false);
+    });
+
+    it("carries the review once written, so the guest sees what they said", async () => {
+      await post(guest, bookingId, { rating: 4, comment: "Lovely and quiet." });
+
+      const { review } = await (await detail(guest)).json();
+
+      expect(review).toMatchObject({ rating: 4, comment: "Lovely and quiet." });
+      expect(review.id).toBeTruthy();
+      expect((await (await list(guest)).json()).data[0].hasReview).toBe(true);
+    });
+
+    // A comment is optional, and null is not the same as "no review".
+    it("reports a review with no comment as present", async () => {
+      await post(guest, bookingId, { rating: 5 });
+
+      const { review } = await (await detail(guest)).json();
+
+      expect(review).toMatchObject({ rating: 5, comment: null });
+      expect((await (await list(guest)).json()).data[0].hasReview).toBe(true);
+    });
+
+    // The left join must not turn one booking into several rows, and must not
+    // hide a booking that has no review.
+    it("returns one row per booking either way", async () => {
+      const [second] = await db.insert(bookings).values({
+        propertyId,
+        guestId: guest.id,
+        checkIn: dayFromNow(-30),
+        checkOut: dayFromNow(-27),
+        guestCount: 2,
+        totalAmountCents: 2_700_000,
+        status: "completed",
+      }).returning();
+
+      await post(guest, bookingId, { rating: 5 });
+
+      const { data, meta } = await (await list(guest)).json();
+
+      expect(meta.total).toBe(2);
+      expect(data).toHaveLength(2);
+      expect(data.filter((b: { hasReview: boolean }) => b.hasReview)).toHaveLength(1);
+      expect(data.find((b: { id: string }) => b.id === second.id).hasReview).toBe(false);
+    });
+
+    // An admin reads other people's bookings; the review is on the booking,
+    // and its author is already named by the public listing.
+    it("shows an admin the review on someone else's booking", async () => {
+      await post(guest, bookingId, { rating: 3 });
+
+      const { review } = await (await detail(admin)).json();
+
+      expect(review).toMatchObject({ rating: 3 });
+    });
+  });
+
   describe("reading reviews", () => {
     it("is public", async () => {
       expect((await app.request(`/properties/${propertyId}/reviews`)).status).toBe(200);

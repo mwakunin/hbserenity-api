@@ -1,4 +1,4 @@
-import { and, asc, count, eq, gte, inArray, lte, notExists, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gte, inArray, lte, notExists, sql } from "drizzle-orm";
 import * as HttpStatusCodes from "stoker/http-status-codes";
 import * as HttpStatusPhrases from "stoker/http-status-phrases";
 
@@ -62,6 +62,25 @@ function checkViolationBody(err: unknown) {
   };
 }
 
+/**
+ * The orderings `?sort` may ask for.
+ *
+ * Every one ends on `id`. Neither `createdAt` nor a price is unique, so
+ * without it offset pagination has no total order and a listing can appear on
+ * two pages while another appears on none — the same reason the other
+ * paginated lists carry a tiebreaker.
+ *
+ * A lookup rather than a chain of conditionals so that adding an ordering
+ * cannot quietly skip the tiebreaker, and each entry builds a fresh array
+ * rather than sharing one — drizzle's `orderBy` takes a mutable array, so a
+ * shared `as const` tuple is rejected outright.
+ */
+const ORDERINGS = {
+  newest: () => [desc(properties.createdAt), asc(properties.id)],
+  price_asc: () => [asc(properties.pricePerNightCents), asc(properties.id)],
+  price_desc: () => [desc(properties.pricePerNightCents), asc(properties.id)],
+};
+
 export const list: AppRouteHandler<ListRoute> = async (c) => {
   const {
     county,
@@ -72,6 +91,7 @@ export const list: AppRouteHandler<ListRoute> = async (c) => {
     status,
     checkIn,
     checkOut,
+    sort,
     page,
     limit,
   } = c.req.valid("query");
@@ -188,9 +208,7 @@ export const list: AppRouteHandler<ListRoute> = async (c) => {
       },
       limit,
       offset: (page - 1) * limit,
-      // Unique tiebreaker: `createdAt` alone is not a total order, and
-      // offset pagination needs one.
-      orderBy: [asc(properties.createdAt), asc(properties.id)],
+      orderBy: ORDERINGS[sort](),
     }),
     db.select({ total: count() }).from(properties).where(where),
   ]);
