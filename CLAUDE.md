@@ -904,6 +904,20 @@ a sweep against the wrong image looks exactly like a correct one.
 - UUIDs in tests must be **RFC-valid v4** — `1111...1111` fails zod's
   `.uuid()` on the version/variant nibbles and yields a confusing 422.
 
+`pnpm test:coverage` writes a report to `coverage/` (gitignored). It stands at
+roughly 95% of statements and 87% of branches, and **there are no thresholds
+on purpose**. A build that fails at 79.9% teaches people to write tests that
+touch lines, and a green 80% invites trusting a suite that never asserted
+anything about the half that matters. Read it as a map of what the suite never
+reaches, not as a score.
+
+What it does show usefully is a file nobody tests at all. The current low
+readings are `lib/email.ts`, `env.ts`, `lib/redis.ts` and `lib/auth.ts` —
+configuration whose uncovered branches only execute in production, which is
+worth knowing but not worth chasing. Excluded outright: the schema and
+migration entry points, the process entry points the docker smoke test covers,
+the Better-Auth-generated file, and `lib/types.ts`, which erases to nothing.
+
 The tests that matter most are the overlap ones in
 `src/routes/bookings/bookings.test.ts`: concurrent races resolving to
 exactly one winner, and back-to-back stays still succeeding. They are the
